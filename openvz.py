@@ -3,6 +3,20 @@ import json
 import re
 import os.path
 
+DOCUMENTATION = '''
+---
+module: openvz
+short_description: Create / update / delete OpenVZ containers
+description:
+    - Using this module, you can create, update and delete containers.
+version_added: "1.0"
+author: Guillaume Loetscher
+requirements:
+    - Recent OpenVZ kernel*
+    - vzctl & vzlist
+options:
+'''
+
 VZ_CONF_FOLDER = '/etc/vz/conf/'
 
 
@@ -26,17 +40,19 @@ class OpenVZ():
         # Verifying that the VEID given is OK
         self.check_veid()
         if self.diskspace:
-            self.convert_diskspace()
+            self.diskspace = OpenVZ.convert_space_unit(self.diskspace)
+        if self.ram:
+            self.ram = OpenVZ.convert_space_unit(self.ram)
+            self.ram = OpenVZ.convert_pages(self.ram)
+        if self.swap:
+            self.swap = OpenVZ.convert_space_unit(self.swap)
+            self.swap = OpenVZ.convert_pages(self.swap)
         if self.ips:
             self.ips = OpenVZ.convert_to_list(self.ips)
         if self.nameserver:
             self.nameserver = OpenVZ.convert_to_list(self.nameserver)
         if self.searchdomain:
             self.searchdomain = OpenVZ.convert_to_list(self.searchdomain)
-        if self.ram:
-            self.ram = OpenVZ.convert_pages(self.ram)
-        if self.swap:
-            self.swap = OpenVZ.convert_pages(self.swap)
 
     @staticmethod
     def convert_to_list(value):
@@ -64,29 +80,37 @@ class OpenVZ():
         else:
             return (value / 4096) + 1
 
-    def convert_diskspace(self):
-        """Take the diskspace given in argument, and convert it to bytes,
-        according to the suffix given (G, T, etc...)"""
-        try:
-            suffix = self.diskspace[-1].lower()
-            value = int(self.diskspace[:-1])
-        except (TypeError, IndexError):
-            self.module.fail_json(
-                msg="The diskspace you have entered is apparently incorrect."
-                    "Please provide a diskspace as described in vzctl manual"
-            )
-        if suffix == 'b':
-            self.diskspace = value
-        elif suffix == 'k':
-            self.diskspace = value * 1024
-        elif suffix == 'm':
-            self.diskspace = value * 1024 * 1024
-        elif suffix == 'g':
-            self.diskspace = value * 1024 * 1024 * 1024
-        elif suffix == 't':
-            self.diskspace = value * 1024 * 1024 * 1024 * 1024
-        elif suffix == 'p':
-            self.diskspace = value * 1024 * 1024 * 1024 * 1024 * 1024
+    @staticmethod
+    def convert_space_unit(value_w_suffix):
+        """Take the space given in arguement. If there's a suffix (G, T, etc..),
+        convert the space in bytes. If the value is already an int, then
+        there's no conversion to do. Therefore returning the value
+        """
+        if type(value_w_suffix) is int:
+            result = value_w_suffix
+        else:
+            try:
+                suffix = value_w_suffix[-1].lower()
+                value = int(value_w_suffix[:-1])
+            except (TypeError, IndexError):
+                self.module.fail_json(
+                    msg="The space unit you have entered is apparently"
+                        " incorrect. Please provide an unit as described"
+                        " in vzctl manual"
+                )
+            if suffix == 'b':
+                result = value
+            elif suffix == 'k':
+                result = value * 1024
+            elif suffix == 'm':
+                result = value * 1024 * 1024
+            elif suffix == 'g':
+                result = value * 1024 * 1024 * 1024
+            elif suffix == 't':
+                result = value * 1024 * 1024 * 1024 * 1024
+            elif suffix == 'p':
+                result = value * 1024 * 1024 * 1024 * 1024 * 1024
+        return result
 
     def check_veid(self):
         if type(self.veid) is not int:
