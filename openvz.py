@@ -12,9 +12,119 @@ description:
 version_added: "1.0"
 author: Guillaume Loetscher
 requirements:
-    - Recent OpenVZ kernel*
-    - vzctl & vzlist
+    - a recent OpenVZ kernel
+    - vzctl & vzlist command
 options:
+    veid:
+        description:
+            - This is the ID for the OpenVZ container
+        required: true
+    name:
+        description:
+            - Name of the container
+        required: false
+    hostname:
+        description:
+            - Hostname of the container
+        required: false
+    diskspace:
+        description:
+            - Size of the disk for the container.
+            - You can use a value in bytes or a value using units such as
+            -  B, K, M, G, T or P (lowercase are also supported)
+            - You can also provide a integer value, but in this case, the 
+            - value is in KiB (Kibibytes)
+        required: false
+    ram:
+        description:
+            - Size of the ram for the container.
+            - You can use a value in bytes or a value using units such as
+            -  B, K, M, G, T or P (lowercase are also supported)
+            - You can also provide a integer value, but in this case, the 
+            - value is in bytes.
+        required: false
+    swap:
+        description:
+            - Size of the swap for the container.
+            - You can use a value in bytes or a value using units such as
+            -  B, K, M, G, T or P (lowercase are also supported)
+            - You can also provide a integer value, but in this case, the 
+            - value is in bytes.
+        required: false
+    ostemplate:
+        description:
+            - Template used to create the container.
+            -  This template must be installed on your hypervisor, or it will
+            -  failed
+        required: false
+    ips:
+        description:
+            - You can set one or several IPs in this field. You can either
+            - set the IP directly as a string, or several IPs using a list.
+            - The module will automatically add or remove IPs according to
+            - the information you'll provide.
+            - Please see the example section.
+        required: false
+    onboot:
+        description:
+            - If the container will automatically start at the boot of the
+            - hypervisor.
+        choices: ['on', 'yes', True, 'off', 'no', False]
+        required: false
+    nameserver:
+        description:
+            - Set one or multiple nameserver on the container. You can provide
+            - either a single string as a nameserver, or a list of nameserver.
+            - Please see the example section.
+        required: false
+    searchdomain:
+        description:
+            - Set one or multiple search domains on the container. You can
+            - provide either a single string as a search domain, or a list of
+            - search domains. Please see the example section.
+        required: false
+'''
+
+EXAMPLES = '''
+# Create or update a container, ID 123
+- openvz:
+    veid: 123
+    state: present
+
+# Delete a container ID 123
+- openvz:
+    veid: 123
+    state: absent
+
+# Set a single nameserver, search domain and IP on the container 123
+- openvz:
+    veid: 123
+    state: present
+    nameserver: "172.16.0.1"
+    searchdomain : "example.com"
+    ips: "172.16.10.100"
+
+# Set multiple nameserver, search domains and IPs on the container 123
+- openvz:
+    veid: 123
+    state: present
+    nameserver:
+        - "172.16.0.1"
+        - "172.16.0.2"
+    searchdomain:
+        - "example.com"
+        - "inside.example.com"
+    ips:
+        - "172.16.10.100"
+        - "172.16.10.101"
+
+# Update a diskspace to 20 GB, ram to 2GB and swap to 500 MB
+- openvz
+    veid: 123
+    state: present
+    diskspace: 20G
+    ram: 2G
+    swap: 500000000
 '''
 
 VZ_CONF_FOLDER = '/etc/vz/conf/'
@@ -41,6 +151,8 @@ class OpenVZ():
         self.check_veid()
         if self.diskspace:
             self.diskspace = OpenVZ.convert_space_unit(self.diskspace)
+            self.diskspace /= 1024 # because the size of the option diskspace
+            # is in KB, not bytes.
         if self.ram:
             self.ram = OpenVZ.convert_space_unit(self.ram)
             self.ram = OpenVZ.convert_pages(self.ram)
