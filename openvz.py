@@ -19,6 +19,11 @@ options:
         description:
             - This is the ID for the OpenVZ container
         required: true
+    state:
+        description:
+            - The state of the container you want to acheive.
+        choices: ['present', 'absent']
+        required: true
     name:
         description:
             - Name of the container

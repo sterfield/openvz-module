@@ -23,6 +23,7 @@ You'll also need "vzctl" and "vzlist" command available.
 | Name | Description | Required |
 |------|-------------|----------|
 | veid | This is the ID for the OpenVZ Container | yes |
+| state | The state of the container you want to acheive. Choices: 'present', 'absent'. | yes |
 | name | Name of the container | no |
 | hostname | Hostname of the container | no |
 | diskspace | Size of the disk for the container. You can use a value in bytes or a value using units such as B, K, M, G, T or P (lowercase are also supported). You can also provide a integer value, but in this case, the value is in KiB (Kibibytes) | no |
