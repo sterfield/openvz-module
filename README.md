@@ -9,8 +9,8 @@ This module, called "openvz" will allow you to create / update / delete OpenVZ c
 More precisely :
 
 * if state = present
-..* either the VZ doesn't exists, and it's created according to the option you've entered
-..* or it's already created, and it's only updated (if needed)
+    * either the VZ doesn't exists, and it's created according to the option you've entered
+    * or it's already created, and it's only updated (if needed)
 * if state = absent, then the VZ will be deleted
 
 ### Requirements
