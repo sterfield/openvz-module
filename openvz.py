@@ -135,11 +135,25 @@ EXAMPLES = '''
 VZ_CONF_FOLDER = '/etc/vz/conf/'
 
 
+class OpenVZException(Exception):
+    """ This exception will be thrown when there's an issue with the Kernel
+    """
+
+    def __init__(self, msg):
+        self.msg = msg
+
+class OpenVZKernelException(OpenVZException):
+    pass
+
+class OpenVZListException(OpenVZException):
+    pass
+
 class OpenVZ():
 
     def __init__(self, module):
         self.module = module
         self.changed = False
+        self.layout = module.params.get('layout')
         self.veid = module.params.get('veid')
         self.name = module.params.get('name')
         self.hostname = module.params.get('hostname')
@@ -151,6 +165,16 @@ class OpenVZ():
         self.ram = module.params.get('ram')
         self.swap = module.params.get('swap')
         self.searchdomain = module.params.get('searchdomain')
+        self.kernel = {
+            'linux_kernel': '',
+            'ovz_major_version': -1,
+            'ovz_branch': '',
+            'ovz_minor_version': -1,
+            'ovz_addon_number': -1,
+            'architecture': ''
+        }
+        # Get all information about kernel and verify it's an OpenVZ one
+        self.get_kernel_version()
 
         # Verifying that the VEID given is OK
         self.check_veid()
@@ -171,10 +195,15 @@ class OpenVZ():
         if self.searchdomain:
             self.searchdomain = OpenVZ.convert_to_list(self.searchdomain)
 
+
     @staticmethod
     def convert_to_list(value):
         """Get the value that could be a list or a string.
-        If it's a string, put it into a list, and return it."""
+        If it's a string, put it into a list, and return it. This function comes
+        in handy, as the user is able to provide either lists, or a single
+        string as data. For example, he can provide a list of IPS, or a
+        single IP.
+        """
         if type(value) is not list:
             result = []
             result.append(value)
@@ -199,7 +228,7 @@ class OpenVZ():
 
     @staticmethod
     def convert_space_unit(value_w_suffix):
-        """Take the space given in arguement. If there's a suffix (G, T, etc..),
+        """Take the space given in argument. If there's a suffix (G, T, etc..),
         convert the space in bytes. If the value is already an int, then
         there's no conversion to do. Therefore returning the value
         """
@@ -229,6 +258,74 @@ class OpenVZ():
                 result = value * 1024 * 1024 * 1024 * 1024 * 1024
         return result
 
+    def get_kernel_version(self):
+        """Get the kernel version by calling "uname -r". It will allow to check
+        if this is indeed an OpenVZ kernel, and what can be done (for example,
+         you cannot do ploop on old OpenVZ kernels"""
+        command_line = "uname -r"
+        rc, stdout, stderr = self.module.run_command(command_line)
+        if rc != 0:
+            raise OpenVZKernelException("Cannot get the kernel version.")
+        else:
+            # Main regexp, just to filter the kernel and be sure it mentionned
+            #  openvz
+            regexp_kernel = '(?P<kernel>.+)-openvz-(?P<ovz_info>.*)$'
+            result = re.match(regexp_kernel, stdout)
+            if not result:
+                raise OpenVZKernelException(
+                    "The current kernel doesn't seems to be an OpenVZ one."
+                    "Current kernel : {0}".format(stdout)
+                )
+            else:
+                # It's an OpenVZ kernel, so getting the part after "-openvz-"
+                #  string
+                ovz_string = result.group('ovz_info')
+                linux_kernel = result.group('kernel')
+                self.kernel['linux_kernel'] = linux_kernel
+
+                # if the string is equal to "amd64", then it's an old
+                #  OpenVZ kernel, issued from Debian 6 repository.
+                if ovz_string == "amd64":
+                    self.kernel['architecture'] = 'amd64'
+                else:
+                    # the rest of the uname string is not only "amd64",
+                    #  so it's most likely an OpenVZ kernel, issued from OpenVZ
+                    #  repositories.
+                    # See https://openvz.org/Kernel_versioning for information.
+
+                    regexp_openvz = ('(?P<ovz_major_version>\d{3})'
+                                     '(?P<ovz_branch>stab|test)'
+                                     '(?P<ovz_minor_version>\d{3})\.'
+                                     '(?P<ovz_addon_number>\d)-'
+                                     '(?P<architecture.*)$')
+                    result = re.match(regexp_openvz, ovz_string)
+                    if result:
+                        self.kernel['ovz_major_version'] = int(
+                            result.group('ovz_major_version')
+                        )
+                        self.kernel['ovz_branch'] = result.group('ovz_branch')
+                        self.kernel['ovz_minor_version'] = int(
+                            result.group('ovz_minor_version')
+                        )
+                        self.kernel['ovz_addon_number'] = int(
+                            result.group('ovz_addon_number')
+                        )
+                        self.kernel['architecture'] = result.group(
+                            'architecture'
+                        )
+                    else:
+                        raise OpenVZKernelException(
+                            "Cannot extract OpenVZ information from the kernel."
+                            "Is is OpenVZ ? Current kernel : {0}".format(stdout)
+                        )
+
+    def verify_ploop_availability(self):
+        """Comparing OpenVZ minor_version and major_version, and according to
+        the values, return True or False if the kernel can manage ploop
+        """
+        return (self.kernel['ovz_major_version'] < 42 or
+                self.kernel['ovz_minor_version'] >= 58)
+
     def check_veid(self):
         if type(self.veid) is not int:
             try:
@@ -244,12 +341,27 @@ class OpenVZ():
         command_line = 'vzlist -a1j'
         rc, stdout, stderr = self.module.run_command(command_line)
         if rc != 0:
-            self.module.fail_json(msg="vzlist is not installed or failed to be"
-                                      " executed properly.")
-        veid_list = json.loads(stdout)
+            # Cannot get the JSON output from vzlist, trying to get "standard"
+            # output.
+            command_line = 'vzlist -1a'
+            rc, stdout, stderr = self.module.run_command(command_line)
+            if rc != 0:
+                # The command failed again, raising exception and exiting.
+                raise OpenVZListException(
+                    "vzlist is not installed or failed to be executed properly."
+                    "Stderr : {0}".format(stderr)
+                )
+            else:
+                # We got the list of VEID through "normal" output. Grabing the
+                # list of VEID.
+                veid_list = stdout.split()
+        else:
+            # We got the list of VEID through JSON output.
+            veid_json_list = json.loads(stdout)
+            veid_list = [veid['veid'] for veid in veid_json_list]
         # vzlist -1aj is returning a JSON list of dict, containing only the key
         # 'veid' and the value, for each vz installed on the hypervisor
-        return [veid['veid'] for veid in veid_list]
+        return veid_list
 
     def get_configuration(self):
         """Get the configuration of only one container if veid is set.
@@ -408,20 +520,21 @@ class OpenVZ():
                         " of container {}.\n"
                         "Full line : {}".format(self.veid, command_line)
                 )
-            #self.module.fail_json(msg=command_line)
         self.module.exit_json(changed=self.changed)
 
     def create(self):
+        if not self.verify_ploop_availability() and self.layout == 'ploop':
+            self.module.fail_json(msg="Cannot do ploop")
         if not self.diskspace:
             self.module.fail_json(msg="You haven't provided any diskspace")
-
         create_vz_command = (
-            'vzctl create {veid} --layout ploop'
-            ' --diskspace {diskspace}'
+            'vzctl create {veid} --diskspace {diskspace}'
         ).format(
             veid=self.veid,
             diskspace=self.diskspace,
         )
+        if self.verify_ploop_availability:
+            create_vz_command += " --layout {layout}".format(layout=self.layout)
         if self.hostname:
             create_vz_command += ' --hostname {0}'.format(self.hostname)
         if self.name:
@@ -470,6 +583,7 @@ def main():
         argument_spec=dict(
             veid=dict(required=True),
             name=dict(),
+            layout=dict(choices=['ploop', 'simfs'], required=True),
             hostname=dict(),
             diskspace=dict(),
             ostemplate=dict(),
@@ -485,7 +599,10 @@ def main():
 
     openvz = OpenVZ(module)
     if module.params['state'] == 'present':
-        openvz.create_or_update()
+        try:
+            openvz.create_or_update()
+        except OpenVZException, e:
+            module.fail_json(msg=e.msg)
     elif module.params['state'] == 'absent':
         openvz.delete()
 
