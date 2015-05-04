@@ -171,6 +171,7 @@ class OpenVZ():
         self.veid = module.params.get('veid')
         self.name = module.params.get('name')
         self.hostname = module.params.get('hostname')
+        self.config = module.params.get('config')
         self.ostemplate = module.params.get('ostemplate')
         self.diskspace = module.params.get('diskspace')
         self.ips = module.params.get('ips')
@@ -673,6 +674,8 @@ class OpenVZ():
             create_vz_command += ' --hostname {0}'.format(self.hostname)
         if self.ostemplate:
             create_vz_command += ' --ostemplate {0}'.format(self.ostemplate)
+        if self.config:
+            create_vz_command += ' --config {0}'.format(self.config)
         if self.ips:
             ip_command = ''
             for ip in self.ips:
