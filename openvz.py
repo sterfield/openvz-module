@@ -32,6 +32,14 @@ options:
         description:
             - Hostname of the container
         required: false
+    config:
+        description:
+            - Configuration file used when creating the container
+        required: false
+    ostemplate:
+        description:
+            - Template used to create the container
+        required: false
     diskspace:
         description:
             - Size of the disk for the container.
