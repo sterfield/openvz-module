@@ -1,7 +1,8 @@
 #!/usr/bin/python
 import json
 import re
-
+import subprocess
+import shlex
 
 DOCUMENTATION = '''
 ---
@@ -266,6 +267,32 @@ class OpenVZ():
             return value / 4096
         else:
             return (value / 4096) + 1
+
+    @staticmethod
+    def get_container_status(veid):
+        """
+        Take the VEID in argument, and retrieve the status of the container.
+        This function is only useful when working with a version of vzlist
+        that is not providing the JSON output, because the status is not
+        registered in the configuration file.
+        """
+        vzlist_command = "vzlist -a1 -o status {0}".format(veid)
+        args = shlex.split(vzlist_command)
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        rc = process.wait()
+        stdout = process.stdout.read().rstrip('\n')
+        stderr = process.stderr.read().rstrip('\n')
+        if rc != 0:
+            raise OpenVZListException(
+                "Cannot retrieve the status for the container {0}\n"
+                "stderr: {1}".format(veid, stderr)
+            )
+        else:
+            return stdout
 
     @staticmethod
     def convert_space_unit(value_w_suffix):
@@ -538,6 +565,8 @@ class OpenVZ():
             json_config_map['diskspace'] = file_config_map['diskspace']
             return json_config_map
         elif file_config_map:
+            # Get the status of the container through vzlist
+            file_config_map['status'] = OpenVZ.get_container_status(self.veid)
             return file_config_map
         else:
             raise OpenVZConfigurationException(
