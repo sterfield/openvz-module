@@ -6,13 +6,13 @@ import re
 DOCUMENTATION = '''
 ---
 module: openvz
-short_description: Create / update / delete OpenVZ containers
+short_description: Create / update / delete / start /stop OpenVZ containers
 description:
     - Using this module, you can create, update and delete containers.
-version_added: "1.0"
+version_added: "1.2"
 author: Guillaume Loetscher
 requirements:
-    - a recent OpenVZ kernel
+    - an OpenVZ kernel
     - vzctl & vzlist command
 options:
     veid:
@@ -22,7 +22,7 @@ options:
     state:
         description:
             - The state of the container you want to acheive.
-        choices: ['present', 'absent']
+        choices: ['present', 'absent', 'started', 'stopped']
         required: true
     name:
         description:
@@ -45,7 +45,7 @@ options:
             - Size of the disk for the container.
             - You can use a value in bytes or a value using units such as
             -  B, K, M, G, T or P (lowercase are also supported)
-            - You can also provide a integer value, but in this case, the 
+            - You can also provide a integer value, but in this case, the
             - value is in KiB (Kibibytes)
         required: false
     ram:
@@ -53,7 +53,7 @@ options:
             - Size of the ram for the container.
             - You can use a value in bytes or a value using units such as
             -  B, K, M, G, T or P (lowercase are also supported)
-            - You can also provide a integer value, but in this case, the 
+            - You can also provide a integer value, but in this case, the
             - value is in bytes.
         required: false
     swap:
@@ -61,7 +61,7 @@ options:
             - Size of the swap for the container.
             - You can use a value in bytes or a value using units such as
             -  B, K, M, G, T or P (lowercase are also supported)
-            - You can also provide a integer value, but in this case, the 
+            - You can also provide a integer value, but in this case, the
             - value is in bytes.
         required: false
     ostemplate:
@@ -103,6 +103,16 @@ EXAMPLES = '''
 - openvz:
     veid: 123
     state: present
+
+# Stop a container, ID 123
+- openvz:
+    veid: 123
+    state: stopped
+
+# Start a container, ID 123
+- openvz:
+    veid: 123
+    state: started
 
 # Delete a container ID 123
 - openvz:
@@ -146,13 +156,14 @@ VZ_CONF_FOLDER = '/etc/vz/conf/'
 # but respectively "softlimit" and "hardlimit"
 HARDLIMIT_VARS = ('DISKSPACE', 'DISKINODES')
 # This is the list of variables that are using "limit" and "barrier"
-BARRIER_VARS = ('KMEMSIZE', 'LOCKEDPAGES', 'PRIVVMPAGES', 'SHMPAGES', 'NUMPROC',
-                'PHYSPAGES', 'VMGUARPAGES', 'OOMGUARPAGES', 'NUMTCPSOCK',
-                'NUMFLOCK', 'NUMPTY', 'NUMSIGINFO', 'TCPSNDBUF', 'TCPRCVBUF',
-                'OTHERSOCKBUF', 'DGRAMRCVBUF', 'NUMOTHERSOCK', 'DCACHESIZE',
-                'NUMFILE', 'AVNUMPROC', 'NUMIPTENT', 'SWAPPAGES')
+BARRIER_VARS = ('KMEMSIZE', 'LOCKEDPAGES', 'PRIVVMPAGES', 'SHMPAGES',
+                'NUMPROC', 'PHYSPAGES', 'VMGUARPAGES', 'OOMGUARPAGES',
+                'NUMTCPSOCK', 'NUMFLOCK', 'NUMPTY', 'NUMSIGINFO', 'TCPSNDBUF',
+                'TCPRCVBUF', 'OTHERSOCKBUF', 'DGRAMRCVBUF', 'NUMOTHERSOCK',
+                'DCACHESIZE', 'NUMFILE', 'AVNUMPROC', 'NUMIPTENT', 'SWAPPAGES')
 
 MULTIVALUED_VARS = ('IP_ADDRESS', 'NAMESERVER', 'SEARCHDOMAIN')
+
 
 class OpenVZException(Exception):
     """ This exception will be thrown when there's an issue with the Kernel
@@ -161,14 +172,22 @@ class OpenVZException(Exception):
     def __init__(self, msg):
         self.msg = msg
 
+
 class OpenVZKernelException(OpenVZException):
     pass
+
 
 class OpenVZListException(OpenVZException):
     pass
 
+
 class OpenVZConfigurationException(OpenVZException):
     pass
+
+
+class OpenVZExecutionException(OpenVZException):
+    pass
+
 
 class OpenVZ():
 
@@ -203,7 +222,7 @@ class OpenVZ():
         self.check_veid()
         if self.diskspace:
             self.diskspace = OpenVZ.convert_space_unit(self.diskspace)
-            self.diskspace /= 1024 # because the size of the option diskspace
+            self.diskspace /= 1024  # because the size of the option diskspace
             # is in KB, not bytes.
         if self.ram:
             self.ram = OpenVZ.convert_space_unit(self.ram)
@@ -218,14 +237,13 @@ class OpenVZ():
         if self.searchdomain:
             self.searchdomain = OpenVZ.convert_to_list(self.searchdomain)
 
-
     @staticmethod
     def convert_to_list(value):
         """Get the value that could be a list or a string.
-        If it's a string, put it into a list, and return it. This function comes
-        in handy, as the user is able to provide either lists, or a single
-        string as data. For example, he can provide a list of IPS, or a
-        single IP.
+        If it's a string, put it into a list, and return it. This function
+        comes in handy, as the user is able to provide either lists, or a
+        single string as data. For example, he can provide a list of IPS,
+        or a single IP.
         """
         if type(value) is not list:
             result = []
@@ -241,7 +259,9 @@ class OpenVZ():
         try:
             value = int(value)
         except TypeError:
-            raise OpenVZConfigurationException("You haven't provide an integer as ram / swap size")
+            raise OpenVZConfigurationException(
+                "You haven't provide an integer as ram / swap size"
+            )
         if value % 4096 == 0:
             return value / 4096
         else:
@@ -257,8 +277,8 @@ class OpenVZ():
             result = float(value_w_suffix)
         except (TypeError, ValueError):
             try:
-                # Most likely, the user entered a string like "18G". Taking the last
-                # character, and catching the rest as a value.
+                # Most likely, the user entered a string like "18G". Taking the
+                # last character, and catching the rest as a value.
                 suffix = value_w_suffix[-1].lower()
                 value = float(value_w_suffix[:-1])
             except (TypeError, IndexError):
@@ -344,8 +364,9 @@ class OpenVZ():
                         )
                     else:
                         raise OpenVZKernelException(
-                            "Cannot extract OpenVZ information from the kernel."
-                            "Is is OpenVZ ? Current kernel : {0}".format(stdout)
+                            "Cannot extract OpenVZ information from the"
+                            " kernel. Is is OpenVZ ?"
+                            " Current kernel : {0}".format(stdout)
                         )
 
     def verify_ploop_availability(self):
@@ -377,8 +398,8 @@ class OpenVZ():
             if rc != 0:
                 # The command failed again, raising exception and exiting.
                 raise OpenVZListException(
-                    "vzlist is not installed or failed to be executed properly."
-                    "Stderr : {0}".format(stderr)
+                    "vzlist is not installed or failed to be executed"
+                    "properly.\n Stderr : {0}".format(stderr)
                 )
             else:
                 # We got the list of VEID through "normal" output. Grabing the
@@ -395,8 +416,9 @@ class OpenVZ():
 
     def get_vzlist_json_configuration(self):
         """Getting the configuration of a said container using "vzlist -j".
-        On some older kernels (OpenVZ from Debian 6 for example), the vzlist doesn't have
-        a JSON output, so it'll failed. Returning an empty dict in that case.
+        On some older kernels (OpenVZ from Debian 6 for example), the vzlist
+        doesn't have a JSON output, so it'll failed. Returning an empty dict
+        in that case.
         """
         command = 'vzlist -aj {0}'.format(self.veid)
         rc, stdout, stderr = self.module.run_command(command)
@@ -419,8 +441,8 @@ class OpenVZ():
          - the variable name, in lowercase, as the key
          - the value:
             - a string, if the value is just a string
-            - a small dictionary, containing "softlimit" and "hardlimit" as keys
-              if the variable is listed in HARDLIMIT_VARS
+            - a small dictionary, containing "softlimit" and "hardlimit" as
+              keys if the variable is listed in HARDLIMIT_VARS
             - a small dictionary, containing "barrier" and "limit" as keys, if
               the variable is not listed in HARDLIMIT_VARS
             - a list of values if the variable is listed as MULTIVALUED_VARS
@@ -460,8 +482,8 @@ class OpenVZ():
                 elif variable in MULTIVALUED_VARS:
                     # in old OpenVZ kernel, IPs are stored in variable
                     # "IP_ADDRESS" where in new kernel, they are stored in the
-                    # JSON structure in the "ip" key. Using "ip" key as a common
-                    # key.
+                    # JSON structure in the "ip" key. Using "ip" key as a
+                    # common key.
                     if variable == 'IP_ADDRESS':
                         config_map['ip'] = value.split()
                     else:
@@ -490,11 +512,9 @@ class OpenVZ():
                         config_map[variable.lower()] = value
         return config_map
 
-
-
     def get_container_file_configuration(self):
-        """Get a container configuration from the configuration file, normally stored in
-        /etc/vz/conf/<veid>.conf.
+        """Get a container configuration from the configuration file, normally
+        stored in /etc/vz/conf/<veid>.conf.
         """
         config_file = '/etc/vz/conf/{0}.conf'.format(self.veid)
 
@@ -508,7 +528,6 @@ class OpenVZ():
 
         result = re.findall(regexp, config_content, re.MULTILINE)
         return OpenVZ.extract_variable_information(result)
-
 
     def get_configuration(self):
         """Get the configuration of only one container.
@@ -587,12 +606,13 @@ class OpenVZ():
         return changed_map
 
     def verify_options(self):
-        """Take all the options entered by the user, and try to see if there's any error
-        If so, raising an OpenVZConfigurationException.
+        """Take all the options entered by the user, and try to see if there's
+        any error. If so, raising an OpenVZConfigurationException.
         """
         if not self.verify_ploop_availability() and self.layout == 'ploop':
-            raise OpenVZConfigurationException("Your kernel is too old to do ploop")
-
+            raise OpenVZConfigurationException(
+                "Your kernel is too old to do ploop"
+            )
 
     def create_or_update(self):
         """Check if the container already exists. If yes, update it (if
@@ -664,6 +684,41 @@ class OpenVZ():
                 )
         self.module.exit_json(changed=self.changed)
 
+    def start(self):
+        """
+        Start an OpenVZ container
+        """
+        start_command = 'vzctl start {0}'.format(self.veid)
+        rc, stdout, stderr = self.module.run_command(start_command)
+        if rc != 0 and rc != 32:
+            # return code = 32 is sent when a container is already started
+            # and you asked to start it again.
+            raise OpenVZExecutionException(
+                "Cannot start the VZ !\n"
+                "stderr: {0}".format(stderr)
+            )
+        else:
+            self.module.exit_json(
+                msg="VZ {0} started".format(self.veid),
+                changed=True
+            )
+
+    def stop(self):
+        """
+        Stop an OpenVZ container
+        """
+        stop_command = 'vzctl stop {0}'.format(self.veid)
+        rc, stdout, stderr = self.module.run_command(stop_command)
+        if rc != 0:
+            raise OpenVZExecutionException(
+                "Cannot stop the VZ !\n"
+                "stderr: {0}".format(stderr)
+            )
+        else:
+            self.module.exit_json(
+                msg="VZ {0} stopped".format(self.veid),
+                changed=True
+            )
 
     def create(self):
         """
@@ -675,9 +730,13 @@ class OpenVZ():
         # Checking if the openvz kernel is able to do some ploop or not
         # If so, allowing to put the "layout" option and the "diskspace" option
         if self.verify_ploop_availability():
-            create_vz_command += " --layout {layout}".format(layout=self.layout)
+            create_vz_command += " --layout {layout}".format(
+                layout=self.layout
+            )
             if self.diskspace:
-                create_vz_command += " --diskspace {diskspace}".format(diskspace=self.diskspace)
+                create_vz_command += " --diskspace {diskspace}".format(
+                    diskspace=self.diskspace
+                )
         if self.hostname:
             create_vz_command += ' --hostname {0}'.format(self.hostname)
         if self.ostemplate:
@@ -714,7 +773,9 @@ class OpenVZ():
                 rc, stdout, stderr = self.module.run_command(command)
                 if rc != 0:
                     self.module.fail_json(
-                        msg="Cannot destroy the container {0}".format(self.veid)
+                        msg="Cannot destroy the container {0}".format(
+                            self.veid
+                        )
                     )
                 else:
                     self.changed = True
@@ -726,7 +787,10 @@ def main():
         argument_spec=dict(
             veid=dict(required=True),
             name=dict(),
-            layout=dict(choices=['ploop', 'simfs'], required=True),
+            layout=dict(
+                choices=['ploop', 'simfs'],
+                default='simfs'
+            ),
             hostname=dict(),
             diskspace=dict(),
             ostemplate=dict(),
@@ -737,18 +801,25 @@ def main():
             searchdomain=dict(),
             ram=dict(),
             swap=dict(),
-            state=dict(choices=['present', 'absent'], required=True)
+            state=dict(
+                choices=['present', 'absent', 'stopped', 'started'],
+                required=True
+            )
         )
     )
 
     openvz = OpenVZ(module)
-    if module.params['state'] == 'present':
-        try:
+    try:
+        if module.params['state'] == 'present':
             openvz.create_or_update()
-        except OpenVZException, e:
-            module.fail_json(msg=e.msg)
-    elif module.params['state'] == 'absent':
-        openvz.delete()
+        elif module.params['state'] == 'absent':
+            openvz.delete()
+        elif module.params['state'] == 'started':
+            openvz.start()
+        elif module.params['state'] == 'stopped':
+            openvz.stop()
+    except OpenVZException, e:
+        module.fail_json(msg=e.msg)
 
 from ansible.module_utils.basic import *
 main()
