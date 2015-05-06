@@ -4,7 +4,7 @@ YA Ansible Openvz module
 ## Documentation
 
 ### Summary
-This module, called "openvz" will allow you to create / update / delete OpenVZ containers. One of the primary goal is to keep the "idempotent" behavior of Ansible, using the "state" option.
+This module, called "openvz" will allow you to create / update / delete / start / stop OpenVZ containers. One of the primary goal is to keep the "idempotent" behavior of Ansible, using the "state" option.
 
 More precisely :
 
@@ -12,10 +12,12 @@ More precisely :
     * either the VZ doesn't exists, and it's created according to the option you've entered
     * or it's already created, and it's only updated (if needed)
 * if state = absent, then the VZ will be deleted
+* if state = started, then the VZ will be started
+* if state = stopped, then the VZ will be stopped
 
 ### Requirements
 
-You'll need a "recent" OpenVZ kernel. By recent, I mean "able to deal with ploop", as it's the only layout supported at the moment.
+You'll need an OpenVZ kernel. It has been tested with Debian 6's OpenVZ kernel (which is a pretty old one) and OpenVZ kernel from OpenVZ repository.
 You'll also need "vzctl" and "vzlist" command available.
 
 ### Options
@@ -23,13 +25,15 @@ You'll also need "vzctl" and "vzlist" command available.
 | Name | Description | Required |
 |------|-------------|----------|
 | veid | This is the ID for the OpenVZ Container | yes |
-| state | The state of the container you want to acheive. Choices: 'present', 'absent'. | yes |
+| state | The state of the container you want to acheive. Choices: 'present', 'absent', started', 'stopped'. | yes |
 | name | Name of the container | no |
+| layout | Type of layout used to create the container. By default, it's 'simfs', but can be 'simfs'. You'll need a "new" kernel (major version > 42) to support ploop. | no | 
 | hostname | Hostname of the container | no |
 | diskspace | Size of the disk for the container. You can use a value in bytes or a value using units such as B, K, M, G, T or P (lowercase are also supported). You can also provide a integer value, but in this case, the value is in KiB (Kibibytes) | no |
+| ostemplate | Template used to create the container. If no configuration file are provided, then OpenVZ will pick the one set by default. | no |
+| config | OpenVZ configuration file used for the container. If no configuration file are provided, then OpenVZ will pick the one set by default. | no |
 | ram | Size of the ram for the container. You can use a value in bytes or a value using units such as B, K, M, G, T or P (lowercase are also supported). You can also provide a integer value, but in this case, the value is in bytes. | no |
 | swap | Size of the swap for the container. You can use a value in bytes or a value using units such as B, K, M, G, T or P (lowercase are also supported). You can also provide a integer value, but in this case, the value is in bytes. | no |
-| ostemplate | Template used to create the container. This template must be installed on your hypervisor, or it will failed | no |
 | ips | You can set one or several IPs in this field. You can either set the IP directly as a string, or several IPs using a list. The module will automatically add or remove IPs according to the information you'll provide. Please see the example section. | no |
 | onboot | If the container will automatically start at the boot of the hypervisor. Choices : 'on', 'yes', True, 'off', 'no', False. | no |
 | nameserver | Set one or multiple nameserver on the container. You can provide either a single string as a nameserver, or a list of nameserver. Please see the example section. | no |
@@ -42,6 +46,20 @@ You'll also need "vzctl" and "vzlist" command available.
 - openvz:
     veid: 123
     state: present
+```
+
+### Stop a container, ID 123
+```YAML
+- openvz:
+    veid: 123
+    state: stopped
+```
+
+### Start a container, ID 123
+```YAML
+- openvz:
+    veid: 123
+    state: started
 ```
 
 ### Delete a container ID 123
@@ -89,5 +107,4 @@ You'll also need "vzctl" and "vzlist" command available.
 
 ## Known issues
 
-* Only one layout managed : ploop.
 * If you try to delete a container that is not stopped, the module will fail.
