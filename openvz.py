@@ -500,6 +500,17 @@ class OpenVZ():
                         'barrier': softlimit,
                         'limit': hardlimit,
                     }
+            elif value == "unlimited":
+                if variable in HARDLIMIT_VARS:
+                    config_map[variable.lower()] = {
+                        'softlimit': 9223372036854775807,
+                        'hardlimit': 9223372036854775807
+                    }
+                elif variable in BARRIER_VARS:
+                    config_map[variable.lower()] = {
+                        'barrier': 9223372036854775807,
+                        'limit': 9223372036854775807
+                    }
             else:
                 if variable == 'ONBOOT':
                     if value == 'yes':
