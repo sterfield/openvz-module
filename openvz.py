@@ -620,7 +620,7 @@ class OpenVZ():
             changed_map['ram'] = (None, self.ram)
         try:
             if self.swap and self.swap != config_map['swappages']['limit']:
-                changed_map['swappages'] = (
+                changed_map['swap'] = (
                     config_map['swappages']['limit'],
                     self.swap
                 )
