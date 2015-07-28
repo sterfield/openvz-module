@@ -315,26 +315,29 @@ class Container(object):
         "other" container.
         """
         array = []
-        if self.name != other.name:
+        if self.name and self.name != other.name:
             array.append('--name {0}'.format(self.name))
-        if self.hostname != other.hostname:
+        if self.hostname and self.hostname != other.hostname:
             array.append('--hostname {0}'.format(self.hostname))
-        if self.diskspace != other.diskspace:
-            array.append('--diskspace {0}'.format(self.diskspace))
-        if set(self.ips) != set(other.ips):
-            ips_to_remove = set(other.ips) - set(self.ips)
-            ips_to_add = set(self.ips) - set(other.ips)
+        if self.diskspace and self.diskspace != other.diskspace:
+            # The --diskspace option accept values by default in blocks (1block = 1KB)
+            array.append('--diskspace {0}'.format(self.diskspace / 1000))
+        if self.ips and set(self.ips) != set(other.ips):
+            ips_to_remove = set(self.ips) - set(other.ips)
+            ips_to_add = set(other.ips) - set(self.ips)
             array += ['--ipadd {0}'.format(ip) for ip in ips_to_add]
             array += ['--ipdel {0}'.format(ip) for ip in ips_to_remove]
-        if set(self.nameserver) != set(other.nameserver):
+        if self.nameserver and set(self.nameserver) != set(other.nameserver):
             array += ['--nameserver {0}'.format(ns) for ns in self.nameserver]
-        if set(self.searchdomain) != set(other.searchdomain):
+        if self.searchdomain and set(self.searchdomain) != set(other.searchdomain):
             array += ['--searchdomain {0}'.format(sd) for sd in self.searchdomain]
-        if self.onboot != other.onboot:
+        if self.onboot and self.onboot != other.onboot:
             array.append('--onboot {0}'.format(self.onboot))
-        if self.ram != other.ram:
+        if self.ram and self.ram != other.ram:
             array.append('--ram {0}'.format(self.ram))
-        pass
+        if self.swap and self.swap != other.swap:
+            array.append('--swap {0}'.format(self.swap))
+        return array
 
     def dump(self):
         dict = {
@@ -355,6 +358,7 @@ class Container(object):
         return dict
 
 
+
 class ExpectedContainer(Container):
 
     def __init__(self, module):
@@ -368,7 +372,7 @@ class ExpectedContainer(Container):
         self.ips = self.module.params.get('ips')
         self.veth = self.module.params.get('veth')
         self.nameserver = self.module.params.get('nameserver')
-        self.onboot = self.module.params.get('onboot')
+        self.onboot = ExpectedContainer.set_onboot(self.module.params.get('onboot'))
         self.ram = self.module.params.get('ram')
         self.swap = self.module.params.get('swap')
         self.searchdomain = self.module.params.get('searchdomain')
@@ -387,10 +391,19 @@ class ExpectedContainer(Container):
         if self.searchdomain:
             self.searchdomain = ExpectedContainer.convert_to_list(self.searchdomain)
 
-        from json import dump
-        fd = open('/tmp/expected.map', 'w')
-        dump(self.dump(), fd)
-        fd.close()
+    @staticmethod
+    def set_onboot(value):
+        """In OpenVZ, onboot can have only two value :
+        * "yes"
+        * "no"
+        However, in Ansible, if you put the string "yes" or "on" in a variable, Ansible will convert this value as True.
+        Same for "no" or "off", which convert to False.
+        As a result, checking if True or False, and convert it to "yes" or "no", accordingly.
+        """
+        if value:
+            return "yes"
+        else:
+            return "no"
 
     @staticmethod
     def veth_option_verification(veth):
@@ -413,7 +426,6 @@ class ExpectedContainer(Container):
         you cannot do ploop if the kernel is too old, or you cannot put a "--layout" option).
         """
         create_vz_command = []
-        create_vz_command.append('vzctl create {veid}'.format(veid=self.veid,))
         create_vz_command.append("--layout {layout}".format(layout=self.layout))
         if self.diskspace:
             create_vz_command.append("--diskspace {diskspace}".format(diskspace=self.diskspace))
@@ -435,7 +447,7 @@ class CurrentContainer(Container):
         super(CurrentContainer, self).__init__(module)
         self.config_map = self.get_configuration()
         self.convert_configuration_to_object(self.config_map)
-        self.module.fail_json(msg=self.config_map)
+        self.status = None
 
     def convert_configuration_to_object(self, config_map):
         """Get all the information gathered using either:
@@ -446,33 +458,38 @@ class CurrentContainer(Container):
         with the correct information. That way, it's more easier to compare objects between
         them
         """
-        from json import dump
-        fd = open('/tmp/config.map','w')
-        dump(config_map, fd)
-        fd.close()
-
         self.layout = config_map.get('layout', 'simfs')
         self.name = config_map.get('name', '')
         self.hostname = config_map.get('hostname', '')
         self.config = config_map.get('config', '/etc/vz/conf/{0}.conf'.format(self.veid))
         self.ostemplate = config_map.get('ostemplate', '')
         self.ips = config_map.get('ips', [])
-        self.veth = config_map.get('veth', {})
+        self.veth = config_map.get('veth', [])
         self.nameserver = config_map.get('nameserver', [])
         self.searchdomain = config_map.get('searchdomain', [])
         self.onboot = config_map.get('onboot', 'no')
+        self.status = config_map.get('status')
         try:
-            self.diskspace = config_map['diskspace']['hardlimit']
+            if config_map['diskspace']['hardlimit'] == 9223372036854775807:
+                self.diskspace = 9223372036854775807
+            else:
+                # physpages is expressed in blocks. In Linux, 1 block = 1000kB,
+                # so multiply it by 1000 in order to have bytes
+                self.diskspace = config_map['diskspace']['hardlimit']
         except KeyError:
-            self.diskspace = -1
+            self.diskspace = 9223372036854775807
         try:
+            if config_map['physpages']['limit'] == 9223372036854775807:
+                self.ram = 9223372036854775807
             self.ram = config_map['physpages']['limit']
         except KeyError:
-            self.ram = -1
+            self.ram = 9223372036854775807
         try:
+            if config_map['swappages']['limit'] == 9223372036854775807:
+                self.swap = 9223372036854775807
             self.swap = config_map['swappages']['limit']
         except KeyError:
-            self.swap = -1
+            self.swap = 9223372036854775807
 
         if self.diskspace:
             self.diskspace = ExpectedContainer.convert_space_unit(self.diskspace)
@@ -488,11 +505,6 @@ class CurrentContainer(Container):
             self.nameserver = ExpectedContainer.convert_to_list(self.nameserver)
         if self.searchdomain:
             self.searchdomain = ExpectedContainer.convert_to_list(self.searchdomain)
-        fd = open('/tmp/current.map', 'w')
-        dump(self.dump(), fd)
-        fd.close()
-
-
 
     @staticmethod
     def extract_variable_information(result_list):
@@ -544,12 +556,7 @@ class CurrentContainer(Container):
                     'limit': limit,
                 }
             else:
-                if variable == 'ONBOOT':
-                    if value == 'yes':
-                        config_map[variable.lower()] = True
-                    else:
-                        config_map[variable.lower()] = False
-                elif variable in MULTIVALUED_VARS:
+                if variable in MULTIVALUED_VARS:
                     # Those variables are storing multiple values, separated by
                     # a space, As a result, splitting the value to get an array.
                     if variable == 'IP_ADDRESS':
@@ -557,19 +564,19 @@ class CurrentContainer(Container):
                         # "IP_ADDRESS" where in new kernel, they are stored in
                         # the JSON structure in the "ip" key. Using "ip" key
                         #  as a common key.
-                        config_map['ip'] = value.split()
+                        config_map['ips'] = value.split()
                     else:
                         config_map[variable.lower()] = value.split()
                 elif variable == 'NETIF':
                     # veth are separated by ';' so retrieving the array of veth
                     # by splitting it.
                     veth_list = value.split(';')
-                    veth_dict = {}
+                    veth_extract_list = []
                     for veth in veth_list:
-                        veth_dict.update(
-                            OpenVZ.extract_veth_information(veth)
+                        veth_extract_list.append(
+                            CurrentContainer.extract_veth_information(veth)
                         )
-                    config_map['veth'] = veth_dict
+                    config_map['veth'] = veth_extract_list
                 else:
                     # Trying to convert the value in integer. If it fails, then
                     # it's most likely a string, then copy it as it is
@@ -661,69 +668,62 @@ class CurrentContainer(Container):
         else:
             return stdout
 
+    def delete(self):
+        """Try to stop a container.
+        Return True if the hypervisor managed to destroy the container
+        Raise exceptions if :
+        * the container is not stopped
+        * the container cannot be destroyed, for an unknown reason
+        """
+        if self.status != 'stopped':
+                raise OpenVZExecutionException("Cannot destroy the container, it's not stopped !")
+        else:
+            command = 'vzctl destroy {0}'.format(self.veid)
+            rc, stdout, stderr = self.module.run_command(command)
+            if rc != 0:
+                raise OpenVZExecutionException("Cannot destroy the container {0}".format(self.veid))
+            else:
+                return True
 
-class OpenVZ():
+    def start(self):
+        """Try to start a container
+        Return False if the container is already started (as there's no modification)
+        Return True if the container is started by the hypervisor
+        Raise an Exception if there's some other issues.
+        """
+        if self.status == 'started':
+            return False
+        else:
+            start_command = 'vzctl start {0}'.format(self.veid)
+            rc, stdout, stderr = self.module.run_command(start_command)
+            if rc != 0 and rc != 32:
+                # return code = 32 is sent when a container is already started
+                # and you asked to start it again.
+                raise OpenVZExecutionException(
+                    "Cannot start the VZ !\n"
+                    "stderr: {0}".format(stderr)
+                )
+            else:
+                return True
 
-    def __init__(self, module):
-        self.module = module
-        self.changed = False
-        self.layout = module.params.get('layout')
-        self.veid = module.params.get('veid')
-        self.name = module.params.get('name')
-        self.hostname = module.params.get('hostname')
-        self.config = module.params.get('config')
-        self.ostemplate = module.params.get('ostemplate')
-        self.diskspace = module.params.get('diskspace')
-        self.ips = module.params.get('ips')
-        self.veth = module.params.get('veth')
-        self.nameserver = module.params.get('nameserver')
-        self.onboot = module.params.get('onboot')
-        self.ram = module.params.get('ram')
-        self.swap = module.params.get('swap')
-        self.searchdomain = module.params.get('searchdomain')
-        self.kernel = {
-            'linux_kernel': '',
-            'ovz_major_version': -1,
-            'ovz_branch': '',
-            'ovz_minor_version': -1,
-            'ovz_addon_number': -1,
-            'architecture': ''
-        }
-        # Get all information about kernel and verify it's an OpenVZ one
-        self.get_kernel_version()
-
-        OpenVZ.veth_option_verification(self.veth)
-        # Verifying that the VEID given is OK
-        self.check_veid()
-        if self.diskspace:
-            self.diskspace = OpenVZ.convert_space_unit(self.diskspace)
-            self.diskspace /= 1024  # because the size of the option diskspace
-            # is in KB, not bytes.
-        if self.ram:
-            self.ram = OpenVZ.convert_space_unit(self.ram)
-            self.ram = OpenVZ.convert_pages(self.ram)
-        if self.swap:
-            self.swap = OpenVZ.convert_space_unit(self.swap)
-            self.swap = OpenVZ.convert_pages(self.swap)
-        if self.ips:
-            self.ips = OpenVZ.convert_to_list(self.ips)
-        if self.nameserver:
-            self.nameserver = OpenVZ.convert_to_list(self.nameserver)
-        if self.searchdomain:
-            self.searchdomain = OpenVZ.convert_to_list(self.searchdomain)
-
-
-
-
-
-
-
-
-
-
-
-
-
+    def stop(self):
+        """Try to stop a container
+        Return False if the container is already stopped (as there's no modification)
+        Return True if the container is stopped by the hypervisor
+        Raise an Exception if there's some other issues.
+        """
+        if self.status == 'stopped':
+            return False
+        else:
+            start_command = 'vzctl stop {0}'.format(self.veid)
+            rc, stdout, stderr = self.module.run_command(start_command)
+            if rc != 0:
+                raise OpenVZExecutionException(
+                    "Cannot stop the VZ {0}!\n"
+                    "stderr: {1}".format(self.veid, stderr)
+                )
+            else:
+                return True
 
     @staticmethod
     def extract_veth_information(veth_string):
@@ -747,87 +747,9 @@ class OpenVZ():
             # output, add the option in the output dict.
             result_dict['bridge'] = ''
 
-        # Get the 'ifname' value, remove if from the result_dict.
-        # Use the ifname value as a key, and use the rest of the dict as value.
-        return { result_dict.pop('ifname'): result_dict }
+        return result_dict
 
 
-
-
-    def to_be_updated(self, config_map):
-        """Get the configuration of the container currently installed on the
-        hypervisor, then check value per value if it needs to be updated or
-        not. If so, return a map containing the argument that needs to be
-        updated as a key, and a tuple as a value. The tuple contains two
-        values : the first is the value before update, the second the value
-        after update."""
-        changed_map = {}
-        if self.onboot and config_map.get('onboot') != self.onboot:
-            changed_map['onboot'] = (config_map.get('onboot'), self.onboot)
-        if self.name and config_map.get('name') != self.name:
-            changed_map['name'] = (config_map.get('name'), self.name)
-        if self.hostname and config_map.get('hostname') != self.hostname:
-            changed_map['hostname'] = (
-                config_map.get('hostname'),
-                self.hostname
-            )
-        try:
-            if (self.diskspace and
-                    config_map['diskspace']['hardlimit'] != self.diskspace):
-                changed_map['diskspace'] = (
-                    config_map['diskspace']['hardlimit'],
-                    self.diskspace
-                )
-        except KeyError:
-            changed_map['diskspace'] = (None, self.diskspace)
-        if self.ips and set(self.ips) != set(config_map.get('ip', [])):
-            changed_map['ips'] = (config_map.get('ip', []), self.ips)
-
-        for veth, options_dict in config_map.get('veth', {}).iteritems():
-            # get all ifname mentionned in the configuration file.
-            # If one ifname mentionned in the module is not in the configuration
-            # file OR if one option of the module is different from the config
-            # file, then update the "changed_map".
-            if (veth not in self.veth or
-                any(
-                    value != self.veth[veth][option]
-                    for option, value in options_dict.items()
-                )):
-                changed_map['veth'] = (
-                    config_map['veth'],
-                    self.veth
-                )
-        if (self.nameserver and
-            set(self.nameserver) != set(
-                config_map.get('nameserver', [])
-            )):
-            changed_map['nameserver'] = (
-                config_map.get('nameserver', []),
-                self.nameserver
-            )
-        try:
-            if self.ram and self.ram != config_map['physpages']['limit']:
-                changed_map['ram'] = (
-                    config_map['physpages']['limit'],
-                    self.ram
-                )
-        except KeyError:
-            changed_map['ram'] = (None, self.ram)
-        try:
-            if self.swap and self.swap != config_map['swappages']['limit']:
-                changed_map['swap'] = (
-                    config_map['swappages']['limit'],
-                    self.swap
-                )
-        except KeyError:
-            changed_map['swappages'] = (None, self.swap)
-        if (self.searchdomain and
-                set(self.searchdomain) != set(config_map.get('searchdomain',
-                                                             []))):
-            changed_map['searchdomain'] = (
-                config_map.get('searchdomain', []), self.searchdomain
-            )
-        return changed_map
 
 
 class Hypervisor(object):
@@ -947,6 +869,18 @@ class Hypervisor(object):
         return (self.kernel['ovz_major_version'] >= 42 and
                 self.kernel['ovz_minor_version'] >= 58)
 
+    def is_vswap_available(self):
+        """Openvz have made a big change in the resources limitation / quotas. The new accounting system is called
+        VSwap (https://wiki.openvz.org/VSwap) and is available in kernel 042stab04x kernels.
+        In short, it means that every non-VSwap is not capable to handle swap / ram quotas correctly (well, at least
+        according to the man vzctl :
+            "For older kernels, this is an accounting-only parameter, showing the usage
+             of RAM by this container. Barrier should be set to 0, and limit should be set to unlimited."
+        This function will return True if the current kernel is Vswap compatible or not.
+        """
+        return (self.kernel['ovz_major_version'] >= 42 and
+                self.kernel['ovz_minor_version'] >= 40)
+
     def verify_create_command_line(self, command_line):
         """Take an array in entry, which is the complete command line, with all the switches and options.
         Remove some parts, mainly because the kernel is too old
@@ -958,178 +892,87 @@ class Hypervisor(object):
                 if '--diskspace' in option:
                     command_line.remove(option)
 
+    def verify_update_command_line(self, command_line):
+        """Take an array in entry, which is the complete command line, with all the switches and options.
+        Remove some parts, mainly because the kernel is too old
+        """
+        if not self.is_vswap_available():
+            for option in command_line[:]:
+                if '--ram' in option:
+                    command_line.remove(option)
+                if '--swap' in option:
+                    command_line.remove(option)
+
     def create_or_update_container(self):
         """Check if the container already exists. If yes, update it (if
-        needed. If no, create it."""
+        needed. If no, create it.
+        Return :
+         - True if the container is indeed created / updated
+         - False if not
+        """
+        changed = False
         if self.expected_container.veid not in self.veid_list:
             create_vz_command = self.expected_container.create()
             self.verify_create_command_line(create_vz_command)
+            create_vz_command.insert(0, 'vzctl create {0}'.format(self.expected_container.veid))
             self.module.run_command(' '.join(create_vz_command))
-
+            changed = True
         current_container = CurrentContainer(self.module)
-            # Getting all the configuration from the currently running container
-            # then doing a diff between the running configuration and the expected configuration
-            # It'll return an array, containing all the command line + options to update the container
-            # accordingly
-        update_vz_command = current_container - self.expected_container
-
-
-
-
-
-
-    def update(self):
-        config_map = self.get_configuration()
-        changed_map = self.to_be_updated(config_map)
-        if changed_map:
-            command_line = "vzctl set {0} --save".format(self.veid)
-            if 'onboot' in changed_map:
-                new_onboot = ('yes' if changed_map['onboot'][1] else 'no')
-                command_line += ' --onboot {0}'.format(new_onboot)
-                self.changed = True
-            if 'name' in changed_map:
-                new_name = changed_map['name'][1]
-                command_line += ' --name {0}'.format(new_name)
-                self.changed = True
-            if 'ips' in changed_map:
-                self.changed = True
-                new_ips_list = changed_map['ips'][1]
-                current_ips_list = changed_map['ips'][0]
-                ips_to_add = set(new_ips_list) - set(current_ips_list)
-                ips_to_remove = set(current_ips_list) - set(new_ips_list)
-                for ip in ips_to_add:
-                    command_line += ' --ipadd {0}'.format(ip)
-                for ip in ips_to_remove:
-                    command_line += ' --ipdel {0}'.format(ip)
-            if 'veth' in changed_map:
-                if config_map['status'] == 'on':
-                    raise OpenVZExecutionException('Cannot change veth while the'
-                                                   'container is running !')
-                self.changed = True
-                new_veth_dict = changed_map['veth'][1]
-                current_veth_dict = changed_map['veth'][0]
-                veth_to_remove = set(current_veth_dict) - set(new_veth_dict)
-                for veth in veth_to_remove:
-                    command_line += ' --netif_del {0}'.format(veth)
-                veth_to_add = set(new_veth_dict) - set(current_veth_dict)
-                for veth in veth_to_add:
-                    command_line += ' --netif_add {0},{1},{2},{3},{4}'.format(
-                        veth,
-                        new_veth_dict[veth]['mac'],
-                        new_veth_dict[veth]['host_ifname'],
-                        new_veth_dict[veth]['host_mac'],
-                        new_veth_dict[veth]['bridge'],
-                    )
-                veth_to_update = set(new_veth_dict)  & set(current_veth_dict)
-                for veth in veth_to_update:
-                    if set(new_veth_dict[veth].items()) != \
-                            set(current_veth_dict[veth].items()):
-
-                        command_line += ' --netif_del {0}'.format(veth)
-                        command_line += ' --netif_add {0},{1},{2},{3},{4}'.format(
-                            veth,
-                            new_veth_dict[veth]['mac'],
-                            new_veth_dict[veth]['host_ifname'],
-                            new_veth_dict[veth]['host_mac'],
-                            new_veth_dict[veth]['bridge'],
-                        )
-
-            if 'hostname' in changed_map:
-                self.changed = True
-                new_hostname = changed_map['hostname'][1]
-                command_line += ' --hostname {0}'.format(new_hostname)
-            if 'nameserver' in changed_map:
-                self.changed = True
-                new_ns_list = changed_map['nameserver'][1]
-                for ns in new_ns_list:
-                    command_line += ' --nameserver {0}'.format(ns)
-            if 'searchdomain' in changed_map:
-                self.changed = True
-                new_searchdomain_list = changed_map['searchdomain'][1]
-                for searchdomain in new_searchdomain_list:
-                    command_line += ' --searchdomain {0}'.format(searchdomain)
-            if 'diskspace' in changed_map:
-                self.changed = True
-                new_diskspace = changed_map['diskspace'][1]
-                command_line += ' --diskspace {0}'.format(new_diskspace)
-            if self.kernel['ovz_major_version'] != -1:
-                # so if the kernel is not a Debian 6 kernel
-                if 'ram' in changed_map:
-                    self.changed = True
-                    new_ram = changed_map['ram'][1]
-                    command_line += ' --physpages {0}'.format(new_ram)
-                if 'swap' in changed_map:
-                    self.changed = True
-                    new_swap = changed_map['swap'][1]
-                    command_line += ' --swappages {0}'.format(new_swap)
-
-            rc, stdout, stderr = self.module.run_command(command_line)
+        # Getting all the configuration from the currently running container
+        # then doing a diff between the running configuration and the expected configuration
+        # It'll return an array, containing all the command line + options to update the container
+        # accordingly
+        update_vz_command = self.expected_container - current_container
+        self.verify_update_command_line(update_vz_command)
+        if update_vz_command:
+            update_vz_command.insert(0, 'vzctl set {0}'.format(self.expected_container.veid))
+            update_vz_command.append('--save')
+            rc, stdout, stderr = self.module.run_command(' '.join(update_vz_command))
             if rc != 0:
-                self.module.fail_json(
-                    msg="Cannot update the configuration"
-                        " of container {0}.\n"
-                        "Full line : {1}".format(self.veid, command_line)
-                )
-        self.module.exit_json(changed=self.changed)
+                raise OpenVZExecutionException('The "vzctl set" command failed !\n'
+                                               'Command invoked : {0}\n'
+                                               'Stderr : {1}\n'.format(' '.join(update_vz_command), stderr))
+            changed = True
+        return changed
 
-    def start(self):
+    def is_vz_not_present(self):
+        if self.expected_container.veid not in self.veid_list:
+            return True
+        else:
+            return False
+
+    def delete_container(self):
+        """Check if the said veid is indeed on the hypervisor. If so, and if the container is stopped, destroy it.
+        If it's not stopped, raise an Exception with the appropriate message.
+        If the veid is not present on the hypervisor, return that nothing was done.
+        """
+        if self.is_vz_not_present():
+            return False
+        else:
+            current_container = CurrentContainer(self.module)
+            return current_container.delete()
+
+    def start_container(self):
         """
         Start an OpenVZ container
         """
-        start_command = 'vzctl start {0}'.format(self.veid)
-        rc, stdout, stderr = self.module.run_command(start_command)
-        if rc != 0 and rc != 32:
-            # return code = 32 is sent when a container is already started
-            # and you asked to start it again.
-            raise OpenVZExecutionException(
-                "Cannot start the VZ !\n"
-                "stderr: {0}".format(stderr)
-            )
+        if self.is_vz_not_present():
+            return False
         else:
-            self.module.exit_json(
-                msg="VZ {0} started".format(self.veid),
-                changed=True
-            )
+            current_container = CurrentContainer(self.module)
+            return current_container.start()
 
-    def stop(self):
+    def stop_container(self):
         """
         Stop an OpenVZ container
         """
-        stop_command = 'vzctl stop {0}'.format(self.veid)
-        rc, stdout, stderr = self.module.run_command(stop_command)
-        if rc != 0:
-            raise OpenVZExecutionException(
-                "Cannot stop the VZ !\n"
-                "stderr: {0}".format(stderr)
-            )
+        if self.is_vz_not_present():
+            return False
         else:
-            self.module.exit_json(
-                msg="VZ {0} stopped".format(self.veid),
-                changed=True
-            )
+            current_container = CurrentContainer(self.module)
+            return current_container.stop()
 
 
-
-    def delete(self):
-        vz_list = self.get_veid_list()
-        if self.veid in vz_list:
-            config_map = self.get_configuration()
-            if config_map['status'] != 'stopped':
-                self.module.fail_json(
-                    msg="Cannot destroy the container, it's not stopped !"
-                )
-            else:
-                command = 'vzctl destroy {0}'.format(self.veid)
-                rc, stdout, stderr = self.module.run_command(command)
-                if rc != 0:
-                    self.module.fail_json(
-                        msg="Cannot destroy the container {0}".format(
-                            self.veid
-                        )
-                    )
-                else:
-                    self.changed = True
-        self.module.exit_json(changed=self.changed)
 
 
 def main():
@@ -1147,7 +990,7 @@ def main():
             config=dict(),
             ips=dict(),
             veth=dict(),
-            onboot=dict(choices=[True, False]),
+            onboot=dict(),
             nameserver=dict(),
             searchdomain=dict(),
             ram=dict(),
@@ -1164,17 +1007,18 @@ def main():
 
     try:
         hypervisor = Hypervisor(module)
-
         if module.params['state'] == 'present':
-            hypervisor.create_or_update_container()
+            result = hypervisor.create_or_update_container()
         elif module.params['state'] == 'absent':
-            hypervisor.destroy_container()
+            result = hypervisor.delete_container()
         elif module.params['state'] == 'started':
-            hypervisor.start_container()
+            result = hypervisor.start_container()
         elif module.params['state'] == 'stopped':
-            hypervisor.stop_container()
+            result = hypervisor.stop_container()
     except OpenVZException, e:
         module.fail_json(msg=e.msg)
+    else:
+        module.exit_json(kwargs=result)
 
 """
 expected = Expected()
