@@ -80,7 +80,7 @@ options:
         description:
             - Allow you to create veth interfaces on your VZ.
             - You can set one or several veths in this field. Each veth can have
-            - multiples options, namely "max", "host_ifname", "host_mac", and "bridge"
+            - multiples options, namely "mac", "host_ifname", "host_mac", and "bridge"
             - Please see the example section.
             - This option is mutually exclusive with option ips
         required: false
