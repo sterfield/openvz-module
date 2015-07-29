@@ -1,16 +1,11 @@
 #!/usr/bin/python
-import json
-import re
-import subprocess
-import shlex
-
 DOCUMENTATION = '''
 ---
 module: openvz
 short_description: Create / update / delete / start /stop OpenVZ containers
 description:
     - Using this module, you can create, update and delete containers.
-version_added: "1.2"
+version_added: "1.3"
 author: Guillaume Loetscher
 requirements:
     - an OpenVZ kernel
@@ -85,8 +80,7 @@ options:
         description:
             - Allow you to create veth interfaces on your VZ.
             - You can set one or several veths in this field. Each veth can have
-            - multiples options, namely "ifname", "max", "host_ifname",
-            - "host_mac", and bridge
+            - multiples options, namely "max", "host_ifname", "host_mac", and "bridge"
             - Please see the example section.
             - This option is mutually exclusive with option ips
         required: false
@@ -160,6 +154,34 @@ EXAMPLES = '''
     diskspace: 20G
     ram: 2G
     swap: 500000000
+
+# Create a container with a veth named eth0. All other veth options are left empty
+- openvz
+    veid:123
+    state: present
+    diskspace: unlimited
+    ram: 1G
+    veth:
+      eth0:
+
+# Create a container with two veth. The first one is named eth0 with no other options.
+# The second veth is called eth1, with those options :
+# - mac: 00:01:02:03:04:05
+# - host_ifname : "mainveth"
+# - host_mac: 00:01:02:03:04:06
+# - bridge : "br0"
+- openvz
+    veid:123
+    state: present
+    diskspace: unlimited
+    ram: 1G
+    veth:
+      eth0:
+      eth1:
+        mac: 00:01:02:03:04:05
+        host_ifname: mainveth
+        host_mac: 00:01:02:03:04:06
+        bridge: br0
 '''
 
 VZ_CONF_FOLDER = '/etc/vz/conf/'
@@ -175,6 +197,8 @@ BARRIER_VARS = ('KMEMSIZE', 'LOCKEDPAGES', 'PRIVVMPAGES', 'SHMPAGES',
                 'DCACHESIZE', 'NUMFILE', 'AVNUMPROC', 'NUMIPTENT', 'SWAPPAGES')
 
 MULTIVALUED_VARS = ('IP_ADDRESS', 'NAMESERVER', 'SEARCHDOMAIN')
+# This is a list of variables that are using storing their information in pages (4096B on Linux), and not in bytes.
+PAGES_VARS = ('LOCKEDPAGES', 'PRIVVMPAGES', 'SHMPAGES', 'PHYSPAGES', 'VMGUARPAGES', 'OOMGUARPAGES', 'SWAPPAGES')
 
 
 class OpenVZException(Exception):
@@ -230,6 +254,21 @@ class Container(object):
             else:
                 self.veid = veid
 
+    @staticmethod
+    def set_onboot(value):
+        """In OpenVZ, onboot can have only two value :
+        * "yes"
+        * "no"
+        However, in Ansible, if you put the string "yes" or "on" in a variable, Ansible will convert this value as True.
+        Same for "no" or "off", which convert to False.
+        As a result, checking if True or False, and convert it to "yes" or "no", accordingly.
+        """
+        if value is None:
+            return None
+        elif value or value == 'yes' or value == 'on':
+            return "yes"
+        else:
+            return "no"
 
     @staticmethod
     def convert_to_list(value):
@@ -262,11 +301,17 @@ class Container(object):
             return (value / 4096) + 1
 
     @staticmethod
-    def convert_space_unit(value_w_suffix):
-        """Take the space given in argument. If there's a suffix (G, T, etc..),
-        convert the space in bytes. If the value is already an int, then
-        there's no conversion to do. Therefore returning the value. If the value
-        is "unlimited", return 9223372036854775807
+    def convert_space_unit(value_w_suffix, pages=False):
+        """Take the space given in argument :
+        - If there's a suffix (G, T, etc..), convert the space in bytes.
+        - If the value is already an int, then there's no conversion to do. Therefore returning the value.
+        - If the value is "unlimited", return 9223372036854775807 (value equal to "unlimited" in OpenVZ).
+        - If the argument "pages" = True, then it means that the value is in "number of pages", and not "number of
+        bytes". So if the value for "swappages" in the configuration file is "0:256M", it means that the user wants
+        to have 256 MB of RAM, but this value will be showed as "barrier:0, limit: 65536" in "vzlist -j"
+        (because 65536 pages * 4096 = 256MB).
+        This is a real mess, so trying to convert every PAGES_VARS in pages, in order to have a consistent view,
+        whatever the source (config file or vzlist).
         """
         if value_w_suffix == 'unlimited':
             return 9223372036854775807
@@ -302,7 +347,47 @@ class Container(object):
                     " incorrect. Please provide an unit as described"
                     " in vzctl manual"
                 )
+            if pages:
+                result /= 4096
         return int(result)
+
+    def veth_difference(self, other):
+        """Take the veth expected and the current veth configuration on the container, and create all the command line
+        options in order to add / remove / update the veth accordingly.
+        """
+        result = []
+
+        veth_to_add = set(self.veth) - set(other.veth)
+        for ifname in veth_to_add:
+            result.append('--netif_add {0},{1},{2},{3},{4}'.format(
+                ifname,
+                self.veth[ifname]['mac'],
+                self.veth[ifname]['host_ifname'],
+                self.veth[ifname]['host_mac'],
+                self.veth[ifname]['bridge'],
+            ))
+
+        veth_to_remove = set(other.veth) - set(self.veth)
+        result += ['--netif_del {0}'.format(ifname) for ifname in veth_to_remove]
+
+        veth_already_present = set(other.veth) & set(self.veth)
+        # There's already a veth with the same ifname. Verifying if the parameters needs to be updated
+        for ifname in veth_already_present:
+            update_veth_list = []
+            for param, value in self.veth[ifname].iteritems():
+                # iterate over the list of parameters entered by the user. As all parameters are optional in Ansible
+                # there's a modification only if the user parameter is not empty and the current parameter is
+                # different.
+                if value and value != other.veth[ifname][param]:
+                    update_veth_list.append('--{0} {1}'.format(param, self.veth[ifname][param]))
+            if update_veth_list:
+                # If there's something in update_veth_list, then it means that the user mentionned an already
+                # existing veth interface, but with a different parameter. So adding the name of the interface in
+                # the option '--ifname'
+                update_veth_list.insert(0, '--ifname {0}'.format(ifname))
+            result += update_veth_list
+
+        return result
 
     def __sub__(self, other):
         """Return the difference between the current object and the "other" one.
@@ -320,13 +405,15 @@ class Container(object):
         if self.hostname and self.hostname != other.hostname:
             array.append('--hostname {0}'.format(self.hostname))
         if self.diskspace and self.diskspace != other.diskspace:
-            # The --diskspace option accept values by default in blocks (1block = 1KB)
-            array.append('--diskspace {0}'.format(self.diskspace / 1000))
-        if self.ips and set(self.ips) != set(other.ips):
+            array.append('--diskspace {0}'.format(self.diskspace))
+        if set(self.ips) != set(other.ips):
             ips_to_remove = set(self.ips) - set(other.ips)
             ips_to_add = set(other.ips) - set(self.ips)
             array += ['--ipadd {0}'.format(ip) for ip in ips_to_add]
             array += ['--ipdel {0}'.format(ip) for ip in ips_to_remove]
+
+        array += self.veth_difference(other)
+
         if self.nameserver and set(self.nameserver) != set(other.nameserver):
             array += ['--nameserver {0}'.format(ns) for ns in self.nameserver]
         if self.searchdomain and set(self.searchdomain) != set(other.searchdomain):
@@ -334,29 +421,10 @@ class Container(object):
         if self.onboot and self.onboot != other.onboot:
             array.append('--onboot {0}'.format(self.onboot))
         if self.ram and self.ram != other.ram:
-            array.append('--ram {0}'.format(self.ram))
+            array.append('--physpages {0}'.format(self.ram))
         if self.swap and self.swap != other.swap:
-            array.append('--swap {0}'.format(self.swap))
+            array.append('--swappages {0}'.format(self.swap))
         return array
-
-    def dump(self):
-        dict = {
-            'layout': self.layout,
-            'name': self.name,
-            'hostname': self.hostname,
-            'config': self.config,
-            'ostemplate': self.ostemplate,
-            'diskspace': self.diskspace,
-            'ips': self.ips,
-            'veth': self.veth,
-            'nameserver': self.nameserver,
-            'searchdomain': self.searchdomain,
-            'onboot': self.onboot,
-            'ram': self.ram,
-            'swap': self.swap,
-        }
-        return dict
-
 
 
 class ExpectedContainer(Container):
@@ -369,15 +437,18 @@ class ExpectedContainer(Container):
         self.config = self.module.params.get('config')
         self.ostemplate = self.module.params.get('ostemplate')
         self.diskspace = self.module.params.get('diskspace')
-        self.ips = self.module.params.get('ips')
-        self.veth = self.module.params.get('veth')
+        self.ips = self.module.params.get('ips') if self.module.params.get('ips') is not None else []
+        self.veth = self.module.params.get('veth') if self.module.params.get('veth') is not None else {}
         self.nameserver = self.module.params.get('nameserver')
-        self.onboot = ExpectedContainer.set_onboot(self.module.params.get('onboot'))
+        self.onboot = Container.set_onboot(self.module.params.get('onboot'))
         self.ram = self.module.params.get('ram')
         self.swap = self.module.params.get('swap')
         self.searchdomain = self.module.params.get('searchdomain')
         if self.diskspace:
+            # Converting the space value in bytes. However, this value will then be used in '--diskspace', which is
+            # in kbytes. Hence the division by 1000
             self.diskspace = ExpectedContainer.convert_space_unit(self.diskspace)
+            self.diskspace /= 1000
         if self.ram:
             self.ram = ExpectedContainer.convert_space_unit(self.ram)
             self.ram = ExpectedContainer.convert_pages(self.ram)
@@ -390,31 +461,41 @@ class ExpectedContainer(Container):
             self.nameserver = ExpectedContainer.convert_to_list(self.nameserver)
         if self.searchdomain:
             self.searchdomain = ExpectedContainer.convert_to_list(self.searchdomain)
+        self.verify_veth_parameters()
 
-    @staticmethod
-    def set_onboot(value):
-        """In OpenVZ, onboot can have only two value :
-        * "yes"
-        * "no"
-        However, in Ansible, if you put the string "yes" or "on" in a variable, Ansible will convert this value as True.
-        Same for "no" or "off", which convert to False.
-        As a result, checking if True or False, and convert it to "yes" or "no", accordingly.
+    def verify_veth_parameters(self):
+        """Take the "veth" dictionary from the user, and verify it.
+        - is there a non-empty value for the "ifname" key ?
+        - is it a dict ?
+        Return also default empty values for optional veth parameters
         """
-        if value:
-            return "yes"
-        else:
-            return "no"
+        if self.veth:
+            if not isinstance(self.veth, dict):
+                raise OpenVZConfigurationException("The 'veth' paramater doesn't seems to be properly entered.\n"
+                                                   "Please enter a dictionary, with at least a 'ifname' key.\n"
+                                                   "Please see the examples.")
+            for veth, veth_param in self.veth.iteritems():
+                # take all veth paramaters stored in a dict, and update them with the value or an empty string,
+                # if they are not present.
+                if veth_param is None:
+                    veth_param = {}
+                temp_dict = {
+                    'mac': veth_param.get('mac', ''),
+                    'host_ifname': veth_param.get('host_ifname', ''),
+                    'host_mac': veth_param.get('host_mac', ''),
+                    'bridge': veth_param.get('bridge', ''),
+                }
+                self.veth[veth] = temp_dict
 
     @staticmethod
     def veth_option_verification(veth):
         """Take the veth value entered by the user and verify it.
         """
-
         if veth and veth is not dict:
             raise OpenVZConfigurationException('Option veth seems to be '
                                                'incorrectly setup !')
         for veth, options in veth.iteritems():
-            if set(options) != set('mac', 'host_ifname', 'host_mac', 'bridge'):
+            if set(options) != {'mac', 'host_ifname', 'host_mac', 'bridge'}:
                 raise OpenVZConfigurationException('The veth option does not '
                                                    'have the correct set of'
                                                    ' options !')
@@ -445,9 +526,10 @@ class CurrentContainer(Container):
 
     def __init__(self, module):
         super(CurrentContainer, self).__init__(module)
+        self.status = None
+
         self.config_map = self.get_configuration()
         self.convert_configuration_to_object(self.config_map)
-        self.status = None
 
     def convert_configuration_to_object(self, config_map):
         """Get all the information gathered using either:
@@ -467,14 +549,12 @@ class CurrentContainer(Container):
         self.veth = config_map.get('veth', [])
         self.nameserver = config_map.get('nameserver', [])
         self.searchdomain = config_map.get('searchdomain', [])
-        self.onboot = config_map.get('onboot', 'no')
+        self.onboot = Container.set_onboot(config_map.get('onboot', 'no'))
         self.status = config_map.get('status')
         try:
             if config_map['diskspace']['hardlimit'] == 9223372036854775807:
                 self.diskspace = 9223372036854775807
             else:
-                # physpages is expressed in blocks. In Linux, 1 block = 1000kB,
-                # so multiply it by 1000 in order to have bytes
                 self.diskspace = config_map['diskspace']['hardlimit']
         except KeyError:
             self.diskspace = 9223372036854775807
@@ -490,21 +570,6 @@ class CurrentContainer(Container):
             self.swap = config_map['swappages']['limit']
         except KeyError:
             self.swap = 9223372036854775807
-
-        if self.diskspace:
-            self.diskspace = ExpectedContainer.convert_space_unit(self.diskspace)
-        if self.ram:
-            self.ram = ExpectedContainer.convert_space_unit(self.ram)
-            self.ram = ExpectedContainer.convert_pages(self.ram)
-        if self.swap:
-            self.swap = ExpectedContainer.convert_space_unit(self.swap)
-            self.swap = ExpectedContainer.convert_pages(self.swap)
-        if self.ips:
-            self.ips = ExpectedContainer.convert_to_list(self.ips)
-        if self.nameserver:
-            self.nameserver = ExpectedContainer.convert_to_list(self.nameserver)
-        if self.searchdomain:
-            self.searchdomain = ExpectedContainer.convert_to_list(self.searchdomain)
 
     @staticmethod
     def extract_variable_information(result_list):
@@ -541,16 +606,20 @@ class CurrentContainer(Container):
                     'hardlimit': hardlimit,
                 }
             elif variable in BARRIER_VARS:
+                if variable in PAGES_VARS:
+                    pages = True
+                else:
+                    pages = False
                 if ':' in value:
                     barrier, hardlimit = value.split(':')
-                    barrier = CurrentContainer.convert_space_unit(barrier)
-                    limit = CurrentContainer.convert_space_unit(hardlimit)
+                    barrier = CurrentContainer.convert_space_unit(barrier, pages=pages)
+                    limit = CurrentContainer.convert_space_unit(hardlimit, pages=pages)
                 else:
                     # The variable should be using the format
                     # "barrier:limit" but for unknown reason, sometimes,
                     # there's only one value for the variable. So storing the
                     # same value for barrier and limit.
-                    barrier = limit = CurrentContainer.convert_space_unit(value)
+                    barrier = limit = CurrentContainer.convert_space_unit(value, pages=pages)
                 config_map[variable.lower()] = {
                     'barrier': barrier,
                     'limit': limit,
@@ -571,12 +640,12 @@ class CurrentContainer(Container):
                     # veth are separated by ';' so retrieving the array of veth
                     # by splitting it.
                     veth_list = value.split(';')
-                    veth_extract_list = []
+                    veth_extract_dict = {}
                     for veth in veth_list:
-                        veth_extract_list.append(
+                        veth_extract_dict.update(
                             CurrentContainer.extract_veth_information(veth)
                         )
-                    config_map['veth'] = veth_extract_list
+                    config_map['veth'] = veth_extract_dict
                 else:
                     # Trying to convert the value in integer. If it fails, then
                     # it's most likely a string, then copy it as it is
@@ -624,13 +693,11 @@ class CurrentContainer(Container):
         """
         json_config_map = self.get_vzlist_json_configuration()
         file_config_map = self.get_container_file_configuration()
+
         if json_config_map and file_config_map:
-            # "Real" diskspace was added only recently in vzlist -j.
-            # If the diskspace key is not there, then extract it from the config file.
-            if "diskspace" not in json_config_map:
-                json_config_map['diskspace'] = file_config_map['diskspace']
+            json_config_map['diskspace'] = file_config_map['diskspace']
             # Veth information are only stored in the config file
-            json_config_map['veth'] = file_config_map['veth']
+            json_config_map['veth'] = file_config_map.get('veth', {})
             return json_config_map
         elif file_config_map:
             # Get the status of the container through vzlist
@@ -669,7 +736,7 @@ class CurrentContainer(Container):
             return stdout
 
     def delete(self):
-        """Try to stop a container.
+        """Try to delete a container.
         Return True if the hypervisor managed to destroy the container
         Raise exceptions if :
         * the container is not stopped
@@ -691,7 +758,7 @@ class CurrentContainer(Container):
         Return True if the container is started by the hypervisor
         Raise an Exception if there's some other issues.
         """
-        if self.status == 'started':
+        if self.status == 'running':
             return False
         else:
             start_command = 'vzctl start {0}'.format(self.veid)
@@ -715,8 +782,8 @@ class CurrentContainer(Container):
         if self.status == 'stopped':
             return False
         else:
-            start_command = 'vzctl stop {0}'.format(self.veid)
-            rc, stdout, stderr = self.module.run_command(start_command)
+            stop_command = 'vzctl stop {0}'.format(self.veid)
+            rc, stdout, stderr = self.module.run_command(stop_command)
             if rc != 0:
                 raise OpenVZExecutionException(
                     "Cannot stop the VZ {0}!\n"
@@ -734,7 +801,7 @@ class CurrentContainer(Container):
         * mac
         * host_ifname
         * host_mac
-        Return a dictionary with those values
+        Return a dictionary with the 'ifname' as key and the other parameters as dictionary values
         """
         result_dict = {}
         if not veth_string:
@@ -747,9 +814,7 @@ class CurrentContainer(Container):
             # output, add the option in the output dict.
             result_dict['bridge'] = ''
 
-        return result_dict
-
-
+        return {result_dict.pop('ifname'): result_dict}
 
 
 class Hypervisor(object):
@@ -898,9 +963,9 @@ class Hypervisor(object):
         """
         if not self.is_vswap_available():
             for option in command_line[:]:
-                if '--ram' in option:
+                if '--physpages' in option:
                     command_line.remove(option)
-                if '--swap' in option:
+                if '--swappages' in option:
                     command_line.remove(option)
 
     def create_or_update_container(self):
@@ -915,7 +980,11 @@ class Hypervisor(object):
             create_vz_command = self.expected_container.create()
             self.verify_create_command_line(create_vz_command)
             create_vz_command.insert(0, 'vzctl create {0}'.format(self.expected_container.veid))
-            self.module.run_command(' '.join(create_vz_command))
+            rc, stdout, stderr = self.module.run_command(' '.join(create_vz_command))
+            if rc != 0:
+                raise OpenVZExecutionException('The "vzctl create" command failed !\n'
+                                               'Command invoked : {0}\n'
+                                               'Stderr : {1}\n'.format(' '.join(create_vz_command), stderr))
             changed = True
         current_container = CurrentContainer(self.module)
         # Getting all the configuration from the currently running container
@@ -973,8 +1042,6 @@ class Hypervisor(object):
             return current_container.stop()
 
 
-
-
 def main():
     module = AnsibleModule(
         argument_spec=dict(
@@ -1000,12 +1067,13 @@ def main():
                 required=True
             )
         ),
-        mutually_exclusive= [
+        mutually_exclusive=[
             ['ips', 'veth']
         ]
     )
 
     try:
+        result = False
         hypervisor = Hypervisor(module)
         if module.params['state'] == 'present':
             result = hypervisor.create_or_update_container()
@@ -1018,36 +1086,8 @@ def main():
     except OpenVZException, e:
         module.fail_json(msg=e.msg)
     else:
-        module.exit_json(kwargs=result)
+        module.exit_json(changed=result)
 
-"""
-expected = Expected()
-
-if expected.veid in list_veid:
-    current = Current()
-if present
-    if !current
-        expected.create
-        current.update(expected)
-    else
-        current.update(expected)
-elif absent
-    current.delete
-
-if e
-if present
-    if expected.veid is in list_veid
-        current = Current()
-        if module.params['state'] == 'present':
-            openvz.create_or_update()
-        elif module.params['state'] == 'absent':
-            openvz.delete()
-        elif module.params['state'] == 'started':
-            openvz.start()
-        elif module.params['state'] == 'stopped':
-            openvz.stop()
-
-"""
 
 from ansible.module_utils.basic import *
 main()
