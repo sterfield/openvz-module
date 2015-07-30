@@ -495,7 +495,7 @@ class ExpectedContainer(Container):
             raise OpenVZConfigurationException('Option veth seems to be '
                                                'incorrectly setup !')
         for veth, options in veth.iteritems():
-            if set(options) != {'mac', 'host_ifname', 'host_mac', 'bridge'}:
+            if set(options) != set(['mac', 'host_ifname', 'host_mac', 'bridge']):
                 raise OpenVZConfigurationException('The veth option does not '
                                                    'have the correct set of'
                                                    ' options !')
