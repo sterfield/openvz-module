@@ -545,7 +545,7 @@ class CurrentContainer(Container):
         self.hostname = config_map.get('hostname', '')
         self.config = config_map.get('config', '/etc/vz/conf/{0}.conf'.format(self.veid))
         self.ostemplate = config_map.get('ostemplate', '')
-        self.ips = config_map.get('ips', [])
+        self.ips = config_map.get('ip', [])
         self.veth = config_map.get('veth', [])
         self.nameserver = config_map.get('nameserver', [])
         self.searchdomain = config_map.get('searchdomain', [])
