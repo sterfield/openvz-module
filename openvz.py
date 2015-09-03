@@ -407,8 +407,8 @@ class Container(object):
         if self.diskspace and self.diskspace != other.diskspace:
             array.append('--diskspace {0}'.format(self.diskspace))
         if set(self.ips) != set(other.ips):
-            ips_to_remove = set(self.ips) - set(other.ips)
-            ips_to_add = set(other.ips) - set(self.ips)
+            ips_to_remove = set(other.ips) - set(self.ips)
+            ips_to_add = set(self.ips) - set(other.ips)
             array += ['--ipadd {0}'.format(ip) for ip in ips_to_add]
             array += ['--ipdel {0}'.format(ip) for ip in ips_to_remove]
 
