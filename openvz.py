@@ -1,4 +1,8 @@
 #!/usr/bin/python
+
+import tempfile
+import os.path
+
 DOCUMENTATION = '''
 ---
 module: openvz
@@ -84,6 +88,18 @@ options:
             - Please see the example section.
             - This option is mutually exclusive with option ips
         required: false
+    veth_ips:
+        description:
+            - Allow to configure the veth IPs. Put the name of the VETH as keys.
+            - Each VETH can have up to three parameters : 'address', 'netmask' and 'gateway
+            - The first two are mandatory, the third is optional.
+            - The VETH mentioned in this option MUST be mentioned in the 'veth' option. If not, the module
+            - will fail !
+            - Please note that this option updates the file "/etc/network/interfaces", therefore it's only
+            - useable for Debian and fork of Debian.
+            - Finally, there's currently NO VERIFICATION OF THE INTERFACES FILE. IT WILL BE RECREATED EACH TIME
+            - See the examples below
+            required: false
     onboot:
         description:
             - If the container will automatically start at the boot of the
@@ -182,6 +198,20 @@ EXAMPLES = '''
         host_ifname: mainveth
         host_mac: 00:01:02:03:04:06
         bridge: br0
+
+# Create a container with one veth, and the associated IP configuration for the veth.
+- openvz
+    veid:123
+    state: present
+    diskspace: unlimited
+    ram: 1G
+    veth:
+      eth0:
+    veth_ips:
+      eth0:
+        address: 10.11.12.13
+        netmask: 255.255.255.0
+        gateway: 10.11.12.254
 '''
 
 VZ_CONF_FOLDER = '/etc/vz/conf/'
@@ -238,6 +268,7 @@ class Container(object):
         self.diskspace = None
         self.ips = None
         self.veth = None
+        self.veth_ips = None
         self.nameserver = None
         self.onboot = None
         self.ram = None
@@ -439,6 +470,7 @@ class ExpectedContainer(Container):
         self.diskspace = self.module.params.get('diskspace')
         self.ips = self.module.params.get('ips') if self.module.params.get('ips') is not None else []
         self.veth = self.module.params.get('veth') if self.module.params.get('veth') is not None else {}
+        self.veth_ips = self.module.params.get('veth_ips', {})
         self.nameserver = self.module.params.get('nameserver')
         self.onboot = Container.set_onboot(self.module.params.get('onboot'))
         self.ram = self.module.params.get('ram')
@@ -462,6 +494,32 @@ class ExpectedContainer(Container):
         if self.searchdomain:
             self.searchdomain = ExpectedContainer.convert_to_list(self.searchdomain)
         self.verify_veth_parameters()
+        self.verify_veth_ips_parameters()
+
+    def verify_veth_ips_parameters(self):
+        """
+        Take the VETH IPs configuration entered and verify it.
+        Basically :
+        * veth mentioned in the "veth_ips" dict should be present also in "veth" dict
+        * each "veth_ips" should have at lease an "address" and a "netmask" (gateway is optional).
+        :return:
+        """
+        if not self.veth_ips:
+            return True
+
+        if set(self.veth_ips) != set(self.veth):
+            raise OpenVZConfigurationException("You have mentioned in the 'veth_ips' dict a veth which is not present\n"
+                                               " in the 'veth' dict.\n"
+                                               "Please verify.")
+        for veth, veth_config in self.veth_ips.iteritems():
+            # taking all the keys mentioned in every veth in "veth_ips" and test if there's a key "address"
+            # and netmask in it. If not, raise.
+            if not all(key in veth_config for key in ['address', 'netmask']):
+                raise OpenVZConfigurationException("The veth '{0} in the dict 'veth_ips' has no 'address' or \n"
+                                                   "netmask key in it\n"
+                                                   "Please verify.".format(veth))
+        return True
+
 
     def verify_veth_parameters(self):
         """Take the "veth" dictionary from the user, and verify it.
@@ -551,6 +609,7 @@ class CurrentContainer(Container):
         self.searchdomain = config_map.get('searchdomain', [])
         self.onboot = Container.set_onboot(config_map.get('onboot', 'no'))
         self.status = config_map.get('status')
+        self.root = config_map.get('root', '')
         try:
             if config_map['diskspace']['hardlimit'] == 9223372036854775807:
                 self.diskspace = 9223372036854775807
@@ -792,6 +851,36 @@ class CurrentContainer(Container):
             else:
                 return True
 
+    def mount(self):
+        """
+        Mount the container
+        :return:
+        """
+        if self.status not in ['started', 'mounted']:
+            mount_command = 'vzctl mount {0}'.format(self.veid)
+            rc, stdout, stderr = self.module.run_command(mount_command)
+            if rc != 0:
+                raise OpenVZExecutionException(
+                    "Cannot mount the VZ {0}!\n"
+                    "stderr: {1}".format(self.veid, stderr)
+                )
+        return True
+
+    def umount(self):
+        """
+        Umount the container
+        :return:
+        """
+        if self.status == 'mounted':
+            umount_command = 'vzctl umount {0}'.format(self.veid)
+            rc, stdout, stderr = self.module.run_command(umount_command)
+            if rc != 0:
+                raise OpenVZExecutionException(
+                    "Cannot umount the VZ {0}!\n"
+                    "stderr: {1}".format(self.veid, stderr)
+                )
+        return True
+
     @staticmethod
     def extract_veth_information(veth_string):
         """
@@ -824,6 +913,7 @@ class Hypervisor(object):
         self.veid_list = self.get_veid_list()
         self.kernel = self.get_kernel_version()
         self.expected_container = ExpectedContainer(self.module)
+        self.current_container = None
 
         if self.module.params['layout'] == 'ploop' and not self.is_ploop_available():
             raise OpenVZKernelException("The current kernel is too old to create OpenVZ containers with ploop !")
@@ -986,12 +1076,12 @@ class Hypervisor(object):
                                                'Command invoked : {0}\n'
                                                'Stderr : {1}\n'.format(' '.join(create_vz_command), stderr))
             changed = True
-        current_container = CurrentContainer(self.module)
+        self.current_container = CurrentContainer(self.module)
         # Getting all the configuration from the currently running container
         # then doing a diff between the running configuration and the expected configuration
         # It'll return an array, containing all the command line + options to update the container
         # accordingly
-        update_vz_command = self.expected_container - current_container
+        update_vz_command = self.expected_container - self.current_container
         self.verify_update_command_line(update_vz_command)
         if update_vz_command:
             update_vz_command.insert(0, 'vzctl set {0}'.format(self.expected_container.veid))
@@ -1002,7 +1092,49 @@ class Hypervisor(object):
                                                'Command invoked : {0}\n'
                                                'Stderr : {1}\n'.format(' '.join(update_vz_command), stderr))
             changed = True
+        if self.expected_container.veth_ips:
+            self.deploy_veth_ips_configuration()
         return changed
+
+    def create_interfaces_tail_content(self):
+        """
+        Create the 'interfaces.tail' content, that will be put on the container.
+        :return:
+        """
+        interfaces_content = ""
+        for veth, veth_config in self.expected_container.veth_ips.iteritems():
+            interfaces_content = ("auto eth0\n"
+                                  "iface {0} inet static\n"
+                                  "\taddress {address}\n"
+                                  "\tnetmask {netmask}\n").format(veth, **veth_config)
+            if 'gateway' in veth_config:
+                interfaces_content += "\tgateway {gateway}\n".format(**veth_config)
+
+            interfaces_content += '\n'
+
+        return interfaces_content
+
+
+    def deploy_veth_ips_configuration(self):
+        """
+        Mount the root folder of the container.
+        Get the VETH_IPs configuration entered by the user, and create the file '/etc/network/interfaces.tail' inside
+        the container. This file will be RECREATED entirely AT EACH RUN.
+        Umount the container.
+        :return:
+        """
+        interfaces_tail_content = self.create_interfaces_tail_content()
+
+        self.current_container.mount()
+        interface_tail_fullpath = os.path.join(self.current_container.root, 'etc/network/interfaces')
+        try:
+            fd = open(interface_tail_fullpath, 'w+b')
+        except (IOError, OSError):
+            raise OpenVZExecutionException("Cannot create the file {0} !\n".format(interface_tail_fullpath))
+
+        fd.write(interfaces_tail_content)
+        fd.close()
+        self.current_container.umount()
 
     def is_vz_not_present(self):
         if self.expected_container.veid not in self.veid_list:
@@ -1057,6 +1189,7 @@ def main():
             config=dict(),
             ips=dict(),
             veth=dict(),
+            veth_ips=dict(),
             onboot=dict(),
             nameserver=dict(),
             searchdomain=dict(),

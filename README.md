@@ -36,6 +36,7 @@ You'll also need "vzctl" and "vzlist" command available.
 | swap | Size of the swap for the container. You can use a value in bytes or a value using units such as B, K, M, G, T or P (lowercase are also supported). You can also provide a integer value, but in this case, the value is in bytes. | no |
 | ips | You can set one or several IPs in this field. You can either set the IP directly as a string, or several IPs using a list. The module will automatically add or remove IPs according to the information you'll provide. Please see the example section. This option is mutually exclusive with option veth.  | no |
 | veth | Allow you to create veth interfaces on your VZ. You can set one or several veths in this field. Each veth can have multiples options, namely "mac", "host_ifname", "host_mac", and "bridge". Please see the example section. This option is mutually exclusive with option ips. | no |
+| veth_ips | Allow to configure the veth IPs. Put the name of the VETH as keys. Each VETH can have up to three parameters : 'address', 'netmask' and 'gateway'. The first two are mandatory, the third is optional. The VETH mentioned in this option MUST be mentioned in the 'veth' option. If not, the module will fail ! Please note that this option updates the file "/etc/network/interfaces", therefore it's only useable for Debian and fork of Debian. Finally, there's currently NO VERIFICATION OF THE INTERFACES FILE. IT WILL BE RECREATED EACH TIME | no |
 | onboot | If the container will automatically start at the boot of the hypervisor. Choices : 'on', 'yes', True, 'off', 'no', False. | no |
 | nameserver | Set one or multiple nameserver on the container. You can provide either a single string as a nameserver, or a list of nameserver. Please see the example section. | no |
 | searchdomain | Set one or multiple search domains on the container. You can provide either a single string as a search domain, or a list of search domains. Please see the example section. | no |
@@ -136,6 +137,21 @@ The second veth is called eth1, with those options :
         host_ifname: mainveth
         host_mac: 00:01:02:03:04:06
         bridge: br0
+```
+### Create a container with one veth, and the associated IP configuration for the veth.
+```YAML
+- openvz
+    veid:123
+    state: present
+    diskspace: unlimited
+    ram: 1G
+    veth:
+      eth0:
+    veth_ips:
+      eth0:
+        address: 10.11.12.13
+        netmask: 255.255.255.0
+        gateway: 10.11.12.254
 ```
 
 ## Known issues
