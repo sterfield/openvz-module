@@ -120,10 +120,12 @@ You'll also need "vzctl" and "vzlist" command available.
 ### Create a container with two veth.
 The first one is named eth0 with no other options.
 The second veth is called eth1, with those options :
-- mac: 00:01:02:03:04:05
-- host_ifname : "mainveth"
-- host_mac: 00:01:02:03:04:06
-- bridge : "br0"
+
+* mac: 00:01:02:03:04:05
+* host_ifname : "mainveth"
+* host_mac: 00:01:02:03:04:06
+* bridge : "br0"
+
 ```YAML
 - openvz
     veid:123
@@ -157,3 +159,5 @@ The second veth is called eth1, with those options :
 ## Known issues
 
 * If you try to delete a container that is not stopped, the module will fail.
+* The configuration done using 'veth_ips' will re-create the file '/etc/network/interfaces' each time. It will NOT update
+the interface configuration. This has to be done manually or by restarting the container.
