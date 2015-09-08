@@ -256,7 +256,6 @@ class OpenVZExecutionException(OpenVZException):
 
 
 class Container(object):
-
     def __init__(self, module):
         self.module = module
         self.veid = module.params.get('veid')
@@ -274,6 +273,7 @@ class Container(object):
         self.ram = None
         self.swap = None
         self.searchdomain = None
+        self.root = None
         self.check_veid()
 
     def check_veid(self):
@@ -459,7 +459,6 @@ class Container(object):
 
 
 class ExpectedContainer(Container):
-
     def __init__(self, module):
         super(ExpectedContainer, self).__init__(module)
         self.layout = self.module.params.get('layout')
@@ -519,7 +518,6 @@ class ExpectedContainer(Container):
                                                    "netmask key in it\n"
                                                    "Please verify.".format(veth))
         return True
-
 
     def verify_veth_parameters(self):
         """Take the "veth" dictionary from the user, and verify it.
@@ -581,7 +579,6 @@ class ExpectedContainer(Container):
 
 
 class CurrentContainer(Container):
-
     def __init__(self, module):
         super(CurrentContainer, self).__init__(module)
         self.status = None
@@ -802,7 +799,7 @@ class CurrentContainer(Container):
         * the container cannot be destroyed, for an unknown reason
         """
         if self.status != 'stopped':
-                raise OpenVZExecutionException("Cannot destroy the container, it's not stopped !")
+            raise OpenVZExecutionException("Cannot destroy the container, it's not stopped !")
         else:
             command = 'vzctl destroy {0}'.format(self.veid)
             rc, stdout, stderr = self.module.run_command(command)
@@ -907,7 +904,6 @@ class CurrentContainer(Container):
 
 
 class Hypervisor(object):
-
     def __init__(self, module):
         self.module = module
         self.veid_list = self.get_veid_list()
@@ -1096,9 +1092,9 @@ class Hypervisor(object):
             self.deploy_veth_ips_configuration()
         return changed
 
-    def create_interfaces_tail_content(self):
+    def create_interfaces_content(self):
         """
-        Create the 'interfaces.tail' content, that will be put on the container.
+        Create the 'interfaces' content, that will be put on the container.
         :return:
         """
         interfaces_content = ""
@@ -1114,25 +1110,24 @@ class Hypervisor(object):
 
         return interfaces_content
 
-
     def deploy_veth_ips_configuration(self):
         """
         Mount the root folder of the container.
-        Get the VETH_IPs configuration entered by the user, and create the file '/etc/network/interfaces.tail' inside
+        Get the VETH_IPs configuration entered by the user, and create the file '/etc/network/interfaces' inside
         the container. This file will be RECREATED entirely AT EACH RUN.
         Umount the container.
         :return:
         """
-        interfaces_tail_content = self.create_interfaces_tail_content()
+        interfaces_content = self.create_interfaces_content()
 
         self.current_container.mount()
-        interface_tail_fullpath = os.path.join(self.current_container.root, 'etc/network/interfaces')
+        interface_fullpath = os.path.join(self.current_container.root, 'etc/network/interfaces')
         try:
-            fd = open(interface_tail_fullpath, 'w+b')
+            fd = open(interface_fullpath, 'w+b')
         except (IOError, OSError):
-            raise OpenVZExecutionException("Cannot create the file {0} !\n".format(interface_tail_fullpath))
+            raise OpenVZExecutionException("Cannot create the file {0} !\n".format(interface_fullpath))
 
-        fd.write(interfaces_tail_content)
+        fd.write(interfaces_content)
         fd.close()
         self.current_container.umount()
 
@@ -1223,4 +1218,5 @@ def main():
 
 
 from ansible.module_utils.basic import *
+
 main()
